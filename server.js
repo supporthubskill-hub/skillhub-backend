@@ -14,6 +14,7 @@ if (process.env.JWT_SECRET.length < 32) throw new Error('JWT_SECRET must contain
 
 const app = express();
 const port = Number(process.env.PORT) || 4000;
+const COMMISSION_RATE = 0.10;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -83,6 +84,9 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'not_started';
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS platform_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
     CREATE TABLE IF NOT EXISTS reports (
       id BIGSERIAL PRIMARY KEY,
       reporter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -143,6 +147,16 @@ const allow = (...roles) => (req, res, next) => roles.includes(req.user.role)
 
 app.get('/api/health', async (_req, res, next) => {
   try { await pool.query('SELECT 1'); res.json({ status: 'ok' }); } catch (e) { next(e); }
+});
+
+app.get('/api/payments/config', (_req, res) => {
+  res.json({
+    enabled: false,
+    mode: 'test_only',
+    currency: 'usd',
+    commissionRate: COMMISSION_RATE,
+    message: 'Los pagos reales todavía no están activados.'
+  });
 });
 
 app.post('/api/auth/register', async (req, res, next) => {
@@ -269,9 +283,16 @@ app.post('/api/bookings', auth, allow('user'), async (req, res, next) => {
     const { rows: slots } = await pool.query(`UPDATE availability SET available=FALSE
       WHERE service_id=$1 AND starts_at=$2 AND available=TRUE RETURNING id`, [services[0].id, scheduledAt]);
     if (!slots[0]) return res.status(409).json({ error: 'Ese horario ya no está disponible' });
-    const { rows } = await pool.query(`INSERT INTO bookings(service_id,client_id,scheduled_at,total)
-      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,created_at`,
-      [services[0].id, req.user.id, scheduledAt, services[0].price]);
+    const total = Number(services[0].price);
+    const platformFee = Number((total * COMMISSION_RATE).toFixed(2));
+    const providerAmount = Number((total - platformFee).toFixed(2));
+    const { rows } = await pool.query(`INSERT INTO bookings(
+      service_id,client_id,scheduled_at,total,payment_status,platform_fee,provider_amount
+    ) VALUES($1,$2,$3,$4,'not_started',$5,$6)
+      RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,
+      payment_status AS "paymentStatus",platform_fee::float AS "platformFee",
+      provider_amount::float AS "providerAmount",created_at`,
+      [services[0].id, req.user.id, scheduledAt, total, platformFee, providerAmount]);
     const notes = String(req.body.notes || '').trim().slice(0, 1000);
     if (notes) await pool.query('UPDATE bookings SET notes=$1 WHERE id=$2', [notes, rows[0].id]);
     res.status(201).json({ booking: rows[0] });
@@ -460,7 +481,9 @@ app.get('/api/cases/me', auth, allow('user'), async (req,res,next)=>{
 
 app.get('/api/bookings/me', auth, async (req, res, next) => {
   try {
-    const { rows } = await pool.query(`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,s.name AS "serviceName",
+    const { rows } = await pool.query(`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,
+      b.payment_status AS "paymentStatus",b.platform_fee::float AS "platformFee",
+      b.provider_amount::float AS "providerAmount",s.name AS "serviceName",
       CASE WHEN b.client_id=$1 THEN 'client' ELSE 'provider' END AS perspective
       FROM bookings b JOIN services s ON s.id=b.service_id
       WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC`, [req.user.id]);
