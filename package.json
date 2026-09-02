@@ -1,16 +1,20 @@
 {
   "name": "skillhub-backend",
-  "version": "1.0.0",
-  "description": "Backend API para SkillHub Marketplace",
-  "main": "server.js",
+  "version": "2.0.0",
+  "private": true,
+  "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2"
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.3"
   }
 }
