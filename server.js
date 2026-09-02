@@ -70,6 +70,15 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','cancelled','completed')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS messages (
+      id BIGSERIAL PRIMARY KEY,
+      service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      sender_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      recipient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 1000),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 
@@ -125,7 +134,7 @@ app.post('/api/auth/login', async (req, res, next) => {
 app.get('/api/services', async (_req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT s.id,s.name,s.description AS desc,s.category AS cat,s.service_type AS type,
-      s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName"
+      s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName",u.id AS "providerId"
       FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE ORDER BY s.created_at DESC`);
     res.json(rows);
   } catch (e) { next(e); }
@@ -161,7 +170,28 @@ app.post('/api/bookings', auth, allow('user'), async (req, res, next) => {
     const { rows } = await pool.query(`INSERT INTO bookings(service_id,client_id,scheduled_at,total)
       VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,created_at`,
       [services[0].id, req.user.id, scheduledAt, services[0].price]);
+    const notes = String(req.body.notes || '').trim().slice(0, 1000);
+    if (notes) await pool.query('UPDATE bookings SET notes=$1 WHERE id=$2', [notes, rows[0].id]);
     res.status(201).json({ booking: rows[0] });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/messages', auth, allow('user'), async (req, res, next) => {
+  try {
+    const body = String(req.body.message || '').trim();
+    const serviceId = Number(req.body.serviceId);
+    if (!Number.isInteger(serviceId) || body.length < 1 || body.length > 1000) {
+      return res.status(400).json({ error: 'Escribe un mensaje de 1 a 1000 caracteres' });
+    }
+    const { rows: services } = await pool.query('SELECT provider_id FROM services WHERE id=$1 AND active=TRUE', [serviceId]);
+    if (!services[0]) return res.status(404).json({ error: 'Servicio no encontrado' });
+    if (String(services[0].provider_id) === String(req.user.id)) {
+      return res.status(400).json({ error: 'No puedes contactarte a ti mismo' });
+    }
+    const { rows } = await pool.query(`INSERT INTO messages(service_id,sender_id,recipient_id,body)
+      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",body,created_at`,
+      [serviceId, req.user.id, services[0].provider_id, body]);
+    res.status(201).json({ message: rows[0] });
   } catch (e) { next(e); }
 });
 
