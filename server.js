@@ -185,13 +185,48 @@ app.post('/api/messages', auth, allow('user'), async (req, res, next) => {
     }
     const { rows: services } = await pool.query('SELECT provider_id FROM services WHERE id=$1 AND active=TRUE', [serviceId]);
     if (!services[0]) return res.status(404).json({ error: 'Servicio no encontrado' });
-    if (String(services[0].provider_id) === String(req.user.id)) {
-      return res.status(400).json({ error: 'No puedes contactarte a ti mismo' });
+    const isProvider = String(services[0].provider_id) === String(req.user.id);
+    let recipientId = services[0].provider_id;
+    if (isProvider) {
+      recipientId = Number(req.body.recipientId);
+      const { rows: prior } = await pool.query(`SELECT 1 FROM messages WHERE service_id=$1
+        AND ((sender_id=$2 AND recipient_id=$3) OR (sender_id=$3 AND recipient_id=$2)) LIMIT 1`,
+        [serviceId, req.user.id, recipientId]);
+      if (!Number.isInteger(recipientId) || !prior[0]) return res.status(403).json({ error: 'Conversación no autorizada' });
     }
+    if (String(recipientId) === String(req.user.id)) return res.status(400).json({ error: 'No puedes contactarte a ti mismo' });
     const { rows } = await pool.query(`INSERT INTO messages(service_id,sender_id,recipient_id,body)
-      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",body,created_at`,
-      [serviceId, req.user.id, services[0].provider_id, body]);
+      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",sender_id AS "senderId",recipient_id AS "recipientId",body,created_at`,
+      [serviceId, req.user.id, recipientId, body]);
     res.status(201).json({ message: rows[0] });
+  } catch (e) { next(e); }
+});
+
+app.get('/api/conversations', auth, allow('user'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT DISTINCT ON (m.service_id, CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END)
+      m.service_id AS "serviceId",s.name AS "serviceName",
+      CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END AS "otherUserId",
+      CASE WHEN m.sender_id=$1 THEN recipient.name ELSE sender.name END AS "otherUserName",
+      m.body AS "lastMessage",m.created_at AS "updatedAt"
+      FROM messages m JOIN services s ON s.id=m.service_id
+      JOIN users sender ON sender.id=m.sender_id JOIN users recipient ON recipient.id=m.recipient_id
+      WHERE m.sender_id=$1 OR m.recipient_id=$1
+      ORDER BY m.service_id,CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END,m.created_at DESC`, [req.user.id]);
+    res.json(rows.sort((a,b) => new Date(b.updatedAt)-new Date(a.updatedAt)));
+  } catch (e) { next(e); }
+});
+
+app.get('/api/messages/:serviceId/:otherUserId', auth, allow('user'), async (req, res, next) => {
+  try {
+    const serviceId = Number(req.params.serviceId);
+    const otherUserId = Number(req.params.otherUserId);
+    if (!Number.isInteger(serviceId) || !Number.isInteger(otherUserId)) return res.status(400).json({ error: 'Conversación inválida' });
+    const { rows } = await pool.query(`SELECT m.id,m.sender_id AS "senderId",m.recipient_id AS "recipientId",m.body,m.created_at AS "createdAt"
+      FROM messages m WHERE m.service_id=$1
+      AND ((m.sender_id=$2 AND m.recipient_id=$3) OR (m.sender_id=$3 AND m.recipient_id=$2))
+      ORDER BY m.created_at ASC`, [serviceId, req.user.id, otherUserId]);
+    res.json(rows);
   } catch (e) { next(e); }
 });
 
