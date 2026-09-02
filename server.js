@@ -45,7 +45,13 @@ async function initDb() {
       name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS headline TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS skills TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS languages TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS remote_available BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS experience TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_url TEXT NOT NULL DEFAULT '';
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
@@ -324,19 +330,27 @@ app.patch('/api/bookings/:id/status', auth, allow('user'), async (req, res, next
 
 app.put('/api/profile', auth, allow('user'), async (req, res, next) => {
   try {
+    const headline = String(req.body.headline || '').trim().slice(0, 100);
     const bio = String(req.body.bio || '').trim().slice(0, 600);
+    const skills = String(req.body.skills || '').trim().slice(0, 300);
+    const languages = String(req.body.languages || '').trim().slice(0, 200);
+    const location = String(req.body.location || '').trim().slice(0, 100);
+    const remoteAvailable = req.body.remoteAvailable !== false;
+    const avatarUrl = String(req.body.avatarUrl || '').trim().slice(0, 500);
     const experience = String(req.body.experience || '').trim().slice(0, 600);
     const portfolioUrl = String(req.body.portfolioUrl || '').trim().slice(0, 500);
     if (portfolioUrl && !/^https?:\/\//i.test(portfolioUrl)) return res.status(400).json({ error: 'El portafolio debe comenzar con http:// o https://' });
-    const { rows } = await pool.query(`UPDATE users SET bio=$1,experience=$2,portfolio_url=$3 WHERE id=$4
-      RETURNING id,name,bio,experience,portfolio_url AS "portfolioUrl"`, [bio, experience, portfolioUrl, req.user.id]);
+    if (avatarUrl && !/^https:\/\//i.test(avatarUrl)) return res.status(400).json({ error: 'La imagen debe usar una dirección https://' });
+    const { rows } = await pool.query(`UPDATE users SET headline=$1,bio=$2,skills=$3,languages=$4,location=$5,remote_available=$6,avatar_url=$7,experience=$8,portfolio_url=$9 WHERE id=$10
+      RETURNING id,name,headline,bio,skills,languages,location,remote_available AS "remoteAvailable",avatar_url AS "avatarUrl",experience,portfolio_url AS "portfolioUrl"`,
+      [headline,bio,skills,languages,location,remoteAvailable,avatarUrl,experience,portfolioUrl,req.user.id]);
     res.json(rows[0]);
   } catch (e) { next(e); }
 });
 
 app.get('/api/providers/:id', async (req, res, next) => {
   try {
-    const { rows: users } = await pool.query(`SELECT id,name,bio,experience,portfolio_url AS "portfolioUrl",
+    const { rows: users } = await pool.query(`SELECT id,name,headline,bio,skills,languages,location,remote_available AS "remoteAvailable",avatar_url AS "avatarUrl",experience,portfolio_url AS "portfolioUrl",
       COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r WHERE r.provider_id=users.id),0) AS rating,
       (SELECT COUNT(*)::int FROM reviews r WHERE r.provider_id=users.id) AS "reviewCount"
       FROM users WHERE id=$1 AND role!='admin'`, [req.params.id]);
