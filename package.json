@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js",
-    "test:beta": "node scripts/beta-smoke-test.js"
+    "test:beta": "node scripts/beta-smoke-test.js",
+    "admin:promote": "node scripts/promote-admin.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
