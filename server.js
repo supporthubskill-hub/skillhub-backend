@@ -58,9 +58,12 @@ async function initDb() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS experience TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_url TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS account_status TEXT NOT NULL DEFAULT 'active';
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
     UPDATE users SET role='user' WHERE role IN ('client','provider');
     ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('user','admin'));
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_account_status_check;
+    ALTER TABLE users ADD CONSTRAINT users_account_status_check CHECK (account_status IN ('active','suspended'));
     CREATE TABLE IF NOT EXISTS services (
       id BIGSERIAL PRIMARY KEY,
       provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -135,11 +138,20 @@ async function initDb() {
   `);
 }
 
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
   if (!token) return res.status(401).json({ error: 'Authentication required' });
-  try { req.user = jwt.verify(token, process.env.JWT_SECRET); return next(); }
-  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET, { issuer: 'skillhub' });
+    const { rows } = await pool.query('SELECT id,email,role,name,account_status FROM users WHERE id=$1', [payload.id]);
+    const user = rows[0];
+    if (!user) return res.status(401).json({ error: 'Account not found' });
+    if (user.account_status === 'suspended') return res.status(403).json({ error: 'Account suspended' });
+    req.user = publicUser(user);
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
 }
 
 const allow = (...roles) => (req, res, next) => roles.includes(req.user.role)
@@ -186,7 +198,7 @@ app.post('/api/auth/login', async (req, res, next) => {
   try {
     const { rows } = await pool.query('SELECT * FROM users WHERE email=$1', [cleanEmail(req.body.email)]);
     const user = rows[0];
-    if (!user || !(await bcrypt.compare(String(req.body.password || ''), user.password_hash))) {
+    if (!user || user.account_status === 'suspended' || !(await bcrypt.compare(String(req.body.password || ''), user.password_hash))) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
@@ -200,7 +212,7 @@ app.get('/api/services', async (_req, res, next) => {
       s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName",u.id AS "providerId",
       COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id),0) AS rating,
       (SELECT COUNT(*)::int FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id) AS "reviewCount"
-      FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE ORDER BY s.created_at DESC`);
+      FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE AND u.account_status='active' ORDER BY s.created_at DESC`);
     res.json(rows);
   } catch (e) { next(e); }
 });
@@ -272,31 +284,39 @@ app.delete('/api/availability/:id', auth, allow('user'), async (req, res, next) 
 });
 
 app.post('/api/bookings', auth, allow('user'), async (req, res, next) => {
+  const client = await pool.connect();
   try {
     const scheduledAt = new Date(req.body.date);
     if (!Number.isInteger(Number(req.body.serviceId)) || Number.isNaN(scheduledAt.valueOf()) || scheduledAt <= new Date()) {
       return res.status(400).json({ error: 'Invalid service or future date' });
     }
-    const { rows: services } = await pool.query('SELECT id,price,provider_id FROM services WHERE id=$1 AND active=TRUE', [req.body.serviceId]);
-    if (!services[0]) return res.status(404).json({ error: 'Servicio no encontrado' });
-    if (String(services[0].provider_id) === String(req.user.id)) return res.status(400).json({ error: 'No puedes reservar tu propio servicio' });
-    const { rows: slots } = await pool.query(`UPDATE availability SET available=FALSE
+    await client.query('BEGIN');
+    const { rows: services } = await client.query(`SELECT s.id,s.price,s.provider_id FROM services s
+      JOIN users u ON u.id=s.provider_id WHERE s.id=$1 AND s.active=TRUE AND u.account_status='active'`, [req.body.serviceId]);
+    if (!services[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Servicio no encontrado' }); }
+    if (String(services[0].provider_id) === String(req.user.id)) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'No puedes reservar tu propio servicio' }); }
+    const { rows: slots } = await client.query(`UPDATE availability SET available=FALSE
       WHERE service_id=$1 AND starts_at=$2 AND available=TRUE RETURNING id`, [services[0].id, scheduledAt]);
-    if (!slots[0]) return res.status(409).json({ error: 'Ese horario ya no está disponible' });
+    if (!slots[0]) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Ese horario ya no está disponible' }); }
     const total = Number(services[0].price);
     const platformFee = Number((total * COMMISSION_RATE).toFixed(2));
     const providerAmount = Number((total - platformFee).toFixed(2));
-    const { rows } = await pool.query(`INSERT INTO bookings(
-      service_id,client_id,scheduled_at,total,payment_status,platform_fee,provider_amount
-    ) VALUES($1,$2,$3,$4,'not_started',$5,$6)
+    const notes = String(req.body.notes || '').trim().slice(0, 1000);
+    const { rows } = await client.query(`INSERT INTO bookings(
+      service_id,client_id,scheduled_at,total,payment_status,platform_fee,provider_amount,notes
+    ) VALUES($1,$2,$3,$4,'not_started',$5,$6,$7)
       RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,
       payment_status AS "paymentStatus",platform_fee::float AS "platformFee",
       provider_amount::float AS "providerAmount",created_at`,
-      [services[0].id, req.user.id, scheduledAt, total, platformFee, providerAmount]);
-    const notes = String(req.body.notes || '').trim().slice(0, 1000);
-    if (notes) await pool.query('UPDATE bookings SET notes=$1 WHERE id=$2', [notes, rows[0].id]);
+      [services[0].id, req.user.id, scheduledAt, total, platformFee, providerAmount, notes]);
+    await client.query('COMMIT');
     res.status(201).json({ booking: rows[0] });
-  } catch (e) { next(e); }
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(e);
+  } finally {
+    client.release();
+  }
 });
 
 app.post('/api/messages', auth, allow('user'), async (req, res, next) => {
@@ -363,9 +383,14 @@ app.patch('/api/bookings/:id/status', auth, allow('user'), async (req, res, next
     if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
     const isProvider = String(booking.provider_id) === String(req.user.id);
     const isClient = String(booking.client_id) === String(req.user.id);
-    if ((!isProvider && !isClient) || (['confirmed','completed'].includes(status) && !isProvider)) {
-      return res.status(403).json({ error: 'No tienes permiso para cambiar este estado' });
-    }
+    if (!isProvider && !isClient) return res.status(403).json({ error: 'No tienes permiso para cambiar este estado' });
+    const allowedTransitions = {
+      pending: isProvider ? ['confirmed','cancelled'] : ['cancelled'],
+      confirmed: isProvider ? ['completed','cancelled'] : ['cancelled'],
+      completed: [],
+      cancelled: []
+    };
+    if (!allowedTransitions[booking.status]?.includes(status)) return res.status(409).json({ error: 'Transición de estado no permitida' });
     const { rows: updated } = await pool.query('UPDATE bookings SET status=$1 WHERE id=$2 RETURNING id,status', [status, booking.id]);
     res.json(updated[0]);
   } catch (e) { next(e); }
@@ -396,7 +421,7 @@ app.get('/api/providers/:id', async (req, res, next) => {
     const { rows: users } = await pool.query(`SELECT id,name,headline,bio,skills,languages,location,remote_available AS "remoteAvailable",avatar_url AS "avatarUrl",experience,portfolio_url AS "portfolioUrl",
       COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r WHERE r.provider_id=users.id),0) AS rating,
       (SELECT COUNT(*)::int FROM reviews r WHERE r.provider_id=users.id) AS "reviewCount"
-      FROM users WHERE id=$1 AND role!='admin'`, [req.params.id]);
+      FROM users WHERE id=$1 AND role!='admin' AND account_status='active'`, [req.params.id]);
     if (!users[0]) return res.status(404).json({ error: 'Perfil no encontrado' });
     const { rows: services } = await pool.query('SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE ORDER BY created_at DESC', [req.params.id]);
     const { rows: reviews } = await pool.query(`SELECT r.id,r.rating,r.comment,r.created_at AS "createdAt",u.name AS "reviewerName",s.name AS "serviceName"
@@ -488,6 +513,98 @@ app.get('/api/bookings/me', auth, async (req, res, next) => {
       FROM bookings b JOIN services s ON s.id=b.service_id
       WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC`, [req.user.id]);
     res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/admin/stats', auth, allow('admin'), async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT
+      (SELECT COUNT(*)::int FROM users WHERE role='user') AS "users",
+      (SELECT COUNT(DISTINCT provider_id)::int FROM services WHERE active=TRUE) AS "sellers",
+      (SELECT COUNT(*)::int FROM services WHERE active=TRUE) AS "services",
+      (SELECT COUNT(*)::int FROM bookings) AS "bookings",
+      (SELECT COUNT(*)::int FROM reports WHERE status IN ('open','reviewing')) AS "openReports",
+      (SELECT COUNT(*)::int FROM disputes WHERE status IN ('open','reviewing')) AS "openDisputes",
+      COALESCE((SELECT SUM(platform_fee)::float FROM bookings WHERE status='completed'),0) AS "testCommissions"`);
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/admin/verifications', auth, allow('admin'), async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT id,name,email,identity_status AS "identityStatus",created_at AS "createdAt"
+      FROM users WHERE role='user' AND identity_status='pending' ORDER BY created_at ASC LIMIT 200`);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/admin/verifications/:id', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['verified','rejected'].includes(status)) return res.status(400).json({ error: 'Estado de verificación inválido' });
+    const { rows } = await pool.query(`UPDATE users SET identity_status=$1 WHERE id=$2 AND role='user'
+      RETURNING id,name,email,identity_status AS "identityStatus"`, [status, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/admin/cases', auth, allow('admin'), async (_req, res, next) => {
+  try {
+    const { rows: reports } = await pool.query(`SELECT r.id,'report' AS type,r.reason,r.details,r.status,r.created_at AS "createdAt",
+      reporter.name AS "openedByName",target.name AS "targetName",s.name AS "serviceName"
+      FROM reports r JOIN users reporter ON reporter.id=r.reporter_id
+      LEFT JOIN users target ON target.id=r.target_user_id LEFT JOIN services s ON s.id=r.service_id
+      ORDER BY r.created_at DESC LIMIT 200`);
+    const { rows: disputes } = await pool.query(`SELECT d.id,'dispute' AS type,d.booking_id AS "bookingId",d.reason,d.details,d.status,d.created_at AS "createdAt",
+      u.name AS "openedByName" FROM disputes d JOIN users u ON u.id=d.opened_by
+      ORDER BY d.created_at DESC LIMIT 200`);
+    res.json({ reports, disputes });
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/admin/reports/:id', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['open','reviewing','resolved','dismissed'].includes(status)) return res.status(400).json({ error: 'Estado inválido' });
+    const { rows } = await pool.query('UPDATE reports SET status=$1 WHERE id=$2 RETURNING id,status', [status, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Reporte no encontrado' });
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/admin/disputes/:id', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['open','reviewing','resolved','dismissed'].includes(status)) return res.status(400).json({ error: 'Estado inválido' });
+    const { rows } = await pool.query('UPDATE disputes SET status=$1 WHERE id=$2 RETURNING id,status', [status, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Disputa no encontrada' });
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/admin/users', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0,100);
+    const pattern = `%${q}%`;
+    const { rows } = await pool.query(`SELECT u.id,u.name,u.email,u.role,u.account_status AS "accountStatus",
+      u.identity_status AS "identityStatus",u.created_at AS "createdAt",
+      (SELECT COUNT(*)::int FROM services s WHERE s.provider_id=u.id) AS "serviceCount"
+      FROM users u WHERE ($1='' OR u.name ILIKE $2 OR u.email ILIKE $2)
+      ORDER BY u.created_at DESC LIMIT 200`, [q, pattern]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/admin/users/:id/status', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['active','suspended'].includes(status)) return res.status(400).json({ error: 'Estado de cuenta inválido' });
+    if (String(req.params.id) === String(req.user.id)) return res.status(400).json({ error: 'No puedes suspender tu propia cuenta admin' });
+    const { rows } = await pool.query(`UPDATE users SET account_status=$1 WHERE id=$2 AND role='user'
+      RETURNING id,name,email,account_status AS "accountStatus"`, [status, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json(rows[0]);
   } catch (e) { next(e); }
 });
 
