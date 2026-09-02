@@ -71,6 +71,15 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS availability (
+      id BIGSERIAL PRIMARY KEY,
+      service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      starts_at TIMESTAMPTZ NOT NULL,
+      duration_minutes INTEGER NOT NULL DEFAULT 60 CHECK (duration_minutes BETWEEN 15 AND 480),
+      available BOOLEAN NOT NULL DEFAULT TRUE,
+      UNIQUE(service_id, starts_at)
+    );
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
       service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
@@ -159,14 +168,65 @@ app.post('/api/services', auth, allow('user'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+app.get('/api/services/:id/availability', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT id,starts_at AS "startsAt",duration_minutes AS "durationMinutes"
+      FROM availability WHERE service_id=$1 AND available=TRUE AND starts_at>NOW() ORDER BY starts_at LIMIT 100`, [req.params.id]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/availability/me', auth, allow('user'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT a.id,a.service_id AS "serviceId",s.name AS "serviceName",
+      a.starts_at AS "startsAt",a.duration_minutes AS "durationMinutes",a.available
+      FROM availability a JOIN services s ON s.id=a.service_id WHERE a.provider_id=$1 AND a.starts_at>NOW()
+      ORDER BY a.starts_at`, [req.user.id]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.post('/api/availability', auth, allow('user'), async (req, res, next) => {
+  try {
+    const serviceId = Number(req.body.serviceId);
+    const startsAt = new Date(req.body.startsAt);
+    const duration = Number(req.body.durationMinutes || 60);
+    if (!Number.isInteger(serviceId) || Number.isNaN(startsAt.valueOf()) || startsAt <= new Date() ||
+        !Number.isInteger(duration) || duration < 15 || duration > 480) {
+      return res.status(400).json({ error: 'Horario inválido' });
+    }
+    const { rows: owned } = await pool.query('SELECT 1 FROM services WHERE id=$1 AND provider_id=$2', [serviceId, req.user.id]);
+    if (!owned[0]) return res.status(403).json({ error: 'Solo el propietario puede añadir horarios' });
+    const { rows } = await pool.query(`INSERT INTO availability(service_id,provider_id,starts_at,duration_minutes)
+      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",starts_at AS "startsAt",duration_minutes AS "durationMinutes",available`,
+      [serviceId, req.user.id, startsAt, duration]);
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Ese horario ya existe' });
+    next(e);
+  }
+});
+
+app.delete('/api/availability/:id', auth, allow('user'), async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM availability WHERE id=$1 AND provider_id=$2 AND available=TRUE', [req.params.id, req.user.id]);
+    if (!rowCount) return res.status(404).json({ error: 'Horario no encontrado' });
+    res.status(204).end();
+  } catch (e) { next(e); }
+});
+
 app.post('/api/bookings', auth, allow('user'), async (req, res, next) => {
   try {
     const scheduledAt = new Date(req.body.date);
     if (!Number.isInteger(Number(req.body.serviceId)) || Number.isNaN(scheduledAt.valueOf()) || scheduledAt <= new Date()) {
       return res.status(400).json({ error: 'Invalid service or future date' });
     }
-    const { rows: services } = await pool.query('SELECT id,price FROM services WHERE id=$1 AND active=TRUE', [req.body.serviceId]);
-    if (!services[0]) return res.status(404).json({ error: 'Service not found' });
+    const { rows: services } = await pool.query('SELECT id,price,provider_id FROM services WHERE id=$1 AND active=TRUE', [req.body.serviceId]);
+    if (!services[0]) return res.status(404).json({ error: 'Servicio no encontrado' });
+    if (String(services[0].provider_id) === String(req.user.id)) return res.status(400).json({ error: 'No puedes reservar tu propio servicio' });
+    const { rows: slots } = await pool.query(`UPDATE availability SET available=FALSE
+      WHERE service_id=$1 AND starts_at=$2 AND available=TRUE RETURNING id`, [services[0].id, scheduledAt]);
+    if (!slots[0]) return res.status(409).json({ error: 'Ese horario ya no está disponible' });
     const { rows } = await pool.query(`INSERT INTO bookings(service_id,client_id,scheduled_at,total)
       VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,created_at`,
       [services[0].id, req.user.id, scheduledAt, services[0].price]);
