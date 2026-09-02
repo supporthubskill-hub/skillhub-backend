@@ -4,8 +4,8 @@
   "private": true,
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js",
+    "start": "node scripts/start.js",
+    "check": "node --check server.js && node --check scripts/start.js",
     "test:beta": "node scripts/beta-smoke-test.js",
     "admin:promote": "node scripts/promote-admin.js"
   },
