@@ -45,6 +45,9 @@ async function initDb() {
       name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS experience TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio_url TEXT NOT NULL DEFAULT '';
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
     UPDATE users SET role='user' WHERE role IN ('client','provider');
     ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('user','admin'));
@@ -71,6 +74,15 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS reviews (
+      id BIGSERIAL PRIMARY KEY,
+      booking_id BIGINT UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+      reviewer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT NOT NULL CHECK (char_length(comment) BETWEEN 3 AND 1000),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS availability (
       id BIGSERIAL PRIMARY KEY,
       service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
@@ -143,7 +155,9 @@ app.post('/api/auth/login', async (req, res, next) => {
 app.get('/api/services', async (_req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT s.id,s.name,s.description AS desc,s.category AS cat,s.service_type AS type,
-      s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName",u.id AS "providerId"
+      s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName",u.id AS "providerId",
+      COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id),0) AS rating,
+      (SELECT COUNT(*)::int FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id) AS "reviewCount"
       FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE ORDER BY s.created_at DESC`);
     res.json(rows);
   } catch (e) { next(e); }
@@ -288,6 +302,74 @@ app.get('/api/messages/:serviceId/:otherUserId', auth, allow('user'), async (req
       ORDER BY m.created_at ASC`, [serviceId, req.user.id, otherUserId]);
     res.json(rows);
   } catch (e) { next(e); }
+});
+
+app.patch('/api/bookings/:id/status', auth, allow('user'), async (req, res, next) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['confirmed','cancelled','completed'].includes(status)) return res.status(400).json({ error: 'Estado inválido' });
+    const { rows } = await pool.query(`SELECT b.id,b.client_id,s.provider_id,b.status FROM bookings b
+      JOIN services s ON s.id=b.service_id WHERE b.id=$1`, [req.params.id]);
+    const booking = rows[0];
+    if (!booking) return res.status(404).json({ error: 'Reserva no encontrada' });
+    const isProvider = String(booking.provider_id) === String(req.user.id);
+    const isClient = String(booking.client_id) === String(req.user.id);
+    if ((!isProvider && !isClient) || (['confirmed','completed'].includes(status) && !isProvider)) {
+      return res.status(403).json({ error: 'No tienes permiso para cambiar este estado' });
+    }
+    const { rows: updated } = await pool.query('UPDATE bookings SET status=$1 WHERE id=$2 RETURNING id,status', [status, booking.id]);
+    res.json(updated[0]);
+  } catch (e) { next(e); }
+});
+
+app.put('/api/profile', auth, allow('user'), async (req, res, next) => {
+  try {
+    const bio = String(req.body.bio || '').trim().slice(0, 600);
+    const experience = String(req.body.experience || '').trim().slice(0, 600);
+    const portfolioUrl = String(req.body.portfolioUrl || '').trim().slice(0, 500);
+    if (portfolioUrl && !/^https?:\/\//i.test(portfolioUrl)) return res.status(400).json({ error: 'El portafolio debe comenzar con http:// o https://' });
+    const { rows } = await pool.query(`UPDATE users SET bio=$1,experience=$2,portfolio_url=$3 WHERE id=$4
+      RETURNING id,name,bio,experience,portfolio_url AS "portfolioUrl"`, [bio, experience, portfolioUrl, req.user.id]);
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.get('/api/providers/:id', async (req, res, next) => {
+  try {
+    const { rows: users } = await pool.query(`SELECT id,name,bio,experience,portfolio_url AS "portfolioUrl",
+      COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r WHERE r.provider_id=users.id),0) AS rating,
+      (SELECT COUNT(*)::int FROM reviews r WHERE r.provider_id=users.id) AS "reviewCount"
+      FROM users WHERE id=$1 AND role!='admin'`, [req.params.id]);
+    if (!users[0]) return res.status(404).json({ error: 'Perfil no encontrado' });
+    const { rows: services } = await pool.query('SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE ORDER BY created_at DESC', [req.params.id]);
+    const { rows: reviews } = await pool.query(`SELECT r.id,r.rating,r.comment,r.created_at AS "createdAt",u.name AS "reviewerName",s.name AS "serviceName"
+      FROM reviews r JOIN users u ON u.id=r.reviewer_id JOIN bookings b ON b.id=r.booking_id JOIN services s ON s.id=b.service_id
+      WHERE r.provider_id=$1 ORDER BY r.created_at DESC LIMIT 50`, [req.params.id]);
+    res.json({ profile: users[0], services, reviews });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/reviews', auth, allow('user'), async (req, res, next) => {
+  try {
+    const bookingId = Number(req.body.bookingId);
+    const rating = Number(req.body.rating);
+    const comment = String(req.body.comment || '').trim();
+    if (!Number.isInteger(bookingId) || !Number.isInteger(rating) || rating < 1 || rating > 5 || comment.length < 3 || comment.length > 1000) {
+      return res.status(400).json({ error: 'Reseña inválida' });
+    }
+    const { rows: bookings } = await pool.query(`SELECT b.id,b.client_id,b.status,s.provider_id FROM bookings b JOIN services s ON s.id=b.service_id WHERE b.id=$1`, [bookingId]);
+    const booking = bookings[0];
+    if (!booking || String(booking.client_id) !== String(req.user.id) || booking.status !== 'completed') {
+      return res.status(403).json({ error: 'Solo puedes reseñar una reserva completada' });
+    }
+    const { rows } = await pool.query(`INSERT INTO reviews(booking_id,reviewer_id,provider_id,rating,comment)
+      VALUES($1,$2,$3,$4,$5) RETURNING id,rating,comment,created_at AS "createdAt"`,
+      [booking.id, req.user.id, booking.provider_id, rating, comment]);
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Esta reserva ya tiene una reseña' });
+    next(e);
+  }
 });
 
 app.get('/api/bookings/me', auth, async (req, res, next) => {
