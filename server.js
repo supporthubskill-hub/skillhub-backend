@@ -41,10 +41,13 @@ async function initDb() {
       id BIGSERIAL PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('client', 'provider', 'admin')),
+      role TEXT NOT NULL CHECK (role IN ('user', 'admin')),
       name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+    UPDATE users SET role='user' WHERE role IN ('client','provider');
+    ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('user','admin'));
     CREATE TABLE IF NOT EXISTS services (
       id BIGSERIAL PRIMARY KEY,
       provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -89,7 +92,7 @@ app.post('/api/auth/register', async (req, res, next) => {
     const email = cleanEmail(req.body.email);
     const password = String(req.body.password || '');
     const name = String(req.body.name || '').trim();
-    const role = req.body.role === 'provider' ? 'provider' : 'client';
+    const role = 'user';
     if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {
       return res.status(400).json({ error: 'Check name, email, and password (minimum 8 characters)' });
     }
@@ -128,7 +131,7 @@ app.get('/api/services', async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.post('/api/services', auth, allow('provider'), async (req, res, next) => {
+app.post('/api/services', auth, allow('user'), async (req, res, next) => {
   try {
     const name = String(req.body.name || '').trim();
     const desc = String(req.body.desc || req.body.description || '').trim();
@@ -147,7 +150,7 @@ app.post('/api/services', auth, allow('provider'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.post('/api/bookings', auth, allow('client'), async (req, res, next) => {
+app.post('/api/bookings', auth, allow('user'), async (req, res, next) => {
   try {
     const scheduledAt = new Date(req.body.date);
     if (!Number.isInteger(Number(req.body.serviceId)) || Number.isNaN(scheduledAt.valueOf()) || scheduledAt <= new Date()) {
@@ -164,9 +167,10 @@ app.post('/api/bookings', auth, allow('client'), async (req, res, next) => {
 
 app.get('/api/bookings/me', auth, async (req, res, next) => {
   try {
-    const field = req.user.role === 'provider' ? 's.provider_id' : 'b.client_id';
-    const { rows } = await pool.query(`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,s.name AS "serviceName"
-      FROM bookings b JOIN services s ON s.id=b.service_id WHERE ${field}=$1 ORDER BY b.created_at DESC`, [req.user.id]);
+    const { rows } = await pool.query(`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,s.name AS "serviceName",
+      CASE WHEN b.client_id=$1 THEN 'client' ELSE 'provider' END AS perspective
+      FROM bookings b JOIN services s ON s.id=b.service_id
+      WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC`, [req.user.id]);
     res.json(rows);
   } catch (e) { next(e); }
 });
