@@ -45,6 +45,9 @@ async function initDb() {
       name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_status TEXT NOT NULL DEFAULT 'unverified';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS headline TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS skills TEXT NOT NULL DEFAULT '';
@@ -80,6 +83,25 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS reports (
+      id BIGSERIAL PRIMARY KEY,
+      reporter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      service_id BIGINT REFERENCES services(id) ON DELETE SET NULL,
+      reason TEXT NOT NULL,
+      details TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','reviewing','resolved','dismissed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS disputes (
+      id BIGSERIAL PRIMARY KEY,
+      booking_id BIGINT UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+      opened_by BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      details TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','reviewing','resolved','dismissed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS reviews (
       id BIGSERIAL PRIMARY KEY,
       booking_id BIGINT UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
@@ -384,6 +406,56 @@ app.post('/api/reviews', auth, allow('user'), async (req, res, next) => {
     if (e.code === '23505') return res.status(409).json({ error: 'Esta reserva ya tiene una reseña' });
     next(e);
   }
+});
+
+app.get('/api/security/me', auth, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT email_verified AS "emailVerified",phone_verified AS "phoneVerified",
+      identity_status AS "identityStatus" FROM users WHERE id=$1`, [req.user.id]);
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.post('/api/verification/request', auth, allow('user'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`UPDATE users SET identity_status='pending'
+      WHERE id=$1 AND identity_status IN ('unverified','rejected') RETURNING identity_status AS "identityStatus"`, [req.user.id]);
+    if (!rows[0]) return res.status(409).json({ error: 'La verificación ya está pendiente o completada' });
+    res.json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.post('/api/reports', auth, allow('user'), async (req, res, next) => {
+  try {
+    const targetUserId = req.body.targetUserId ? Number(req.body.targetUserId) : null;
+    const serviceId = req.body.serviceId ? Number(req.body.serviceId) : null;
+    const reason = String(req.body.reason || '').trim().slice(0,100);
+    const details = String(req.body.details || '').trim().slice(0,1500);
+    if ((!targetUserId && !serviceId) || reason.length < 3 || details.length < 10) return res.status(400).json({ error: 'Completa el motivo y los detalles del reporte' });
+    const { rows } = await pool.query(`INSERT INTO reports(reporter_id,target_user_id,service_id,reason,details)
+      VALUES($1,$2,$3,$4,$5) RETURNING id,status,created_at AS "createdAt"`, [req.user.id,targetUserId,serviceId,reason,details]);
+    res.status(201).json(rows[0]);
+  } catch (e) { next(e); }
+});
+
+app.post('/api/disputes', auth, allow('user'), async (req, res, next) => {
+  try {
+    const bookingId=Number(req.body.bookingId),reason=String(req.body.reason||'').trim().slice(0,100),details=String(req.body.details||'').trim().slice(0,1500);
+    const { rows: b } = await pool.query(`SELECT b.id,b.client_id,s.provider_id FROM bookings b JOIN services s ON s.id=b.service_id WHERE b.id=$1`,[bookingId]);
+    if(!b[0] || (String(b[0].client_id)!==String(req.user.id)&&String(b[0].provider_id)!==String(req.user.id))) return res.status(403).json({error:'No puedes abrir una disputa para esta reserva'});
+    if(reason.length<3||details.length<10) return res.status(400).json({error:'Completa el motivo y los detalles'});
+    const {rows}=await pool.query(`INSERT INTO disputes(booking_id,opened_by,reason,details) VALUES($1,$2,$3,$4)
+      RETURNING id,status,created_at AS "createdAt"`,[bookingId,req.user.id,reason,details]);
+    res.status(201).json(rows[0]);
+  } catch(e){if(e.code==='23505')return res.status(409).json({error:'Esta reserva ya tiene una disputa'});next(e);}
+});
+
+app.get('/api/cases/me', auth, allow('user'), async (req,res,next)=>{
+  try{
+    const {rows:reports}=await pool.query('SELECT id,reason,status,created_at AS "createdAt" FROM reports WHERE reporter_id=$1 ORDER BY created_at DESC',[req.user.id]);
+    const {rows:disputes}=await pool.query('SELECT id,booking_id AS "bookingId",reason,status,created_at AS "createdAt" FROM disputes WHERE opened_by=$1 ORDER BY created_at DESC',[req.user.id]);
+    res.json({reports,disputes});
+  }catch(e){next(e);}
 });
 
 app.get('/api/bookings/me', auth, async (req, res, next) => {
