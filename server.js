@@ -1,118 +1,183 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const { Pool } = require('pg');
+
+const required = ['DATABASE_URL', 'JWT_SECRET'];
+const missing = required.filter((key) => !process.env[key]);
+if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
+if (process.env.JWT_SECRET.length < 32) throw new Error('JWT_SECRET must contain at least 32 characters');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'skillhub_secret_key_2026';
+const port = Number(process.env.PORT) || 4000;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-app.use(cors());
-app.use(express.json());
+app.set('trust proxy', 1);
+app.use(helmet());
+app.use(cors({
+  origin(origin, callback) {
+    const allowed = (process.env.FRONTEND_URL || '').split(',').map((v) => v.trim()).filter(Boolean);
+    if (!origin || allowed.includes(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed'));
+  }
+}));
+app.use(express.json({ limit: '32kb' }));
+app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false }));
 
-// Base de datos temporal en memoria
-const db = {
-    users: [
-        {
-            id: 1,
-            email: 'support.hubskill@gmail.com',
-            passwordHash: bcrypt.hashSync('SkillHub2026!AdminSec', 10),
-            role: 'admin',
-            name: 'Admin SkillHub'
-        }
-    ],
-    services: [
-        {
-            id: 101,
-            providerName: "Carlos Pérez",
-            name: "Desarrollo Web Fullstack",
-            category: "Desarrollo",
-            price: 100,
-            rating: 4.9,
-            completedJobs: 28,
-            level: "Top Provider"
-        }
-    ],
-    bookings: []
-};
+const cleanEmail = (value) => String(value || '').trim().toLowerCase();
+const validEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const publicUser = (u) => ({ id: u.id, email: u.email, role: u.role, name: u.name });
 
-const COMMISSION_RATE = 0.10; // 10% de comisión de plataforma
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('client', 'provider', 'admin')),
+      name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS services (
+      id BIGSERIAL PRIMARY KEY,
+      provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      category TEXT NOT NULL,
+      service_type TEXT NOT NULL CHECK (service_type IN ('Remoto', 'Presencial')),
+      price NUMERIC(10,2) NOT NULL CHECK (price >= 0),
+      hourly_price NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (hourly_price >= 0),
+      area TEXT NOT NULL DEFAULT 'Remoto',
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS bookings (
+      id BIGSERIAL PRIMARY KEY,
+      service_id BIGINT NOT NULL REFERENCES services(id),
+      client_id BIGINT NOT NULL REFERENCES users(id),
+      scheduled_at TIMESTAMPTZ NOT NULL,
+      total NUMERIC(10,2) NOT NULL CHECK (total >= 0),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','cancelled','completed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+}
 
-// Rutas de autenticación
-app.post('/api/auth/register', async (req, res) => {
-    try {
-        const { email, password, role, name } = req.body;
-        if (!email || !password || !role) {
-            return res.status(400).json({ error: 'Faltan campos obligatorios' });
-        }
-        
-        const existingUser = db.users.find(u => u.email === email);
-        if (existingUser) {
-            return res.status(400).json({ error: 'El usuario ya existe' });
-        }
+function auth(req, res, next) {
+  const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  if (!token) return res.status(401).json({ error: 'Authentication required' });
+  try { req.user = jwt.verify(token, process.env.JWT_SECRET); return next(); }
+  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+}
 
-        const passwordHash = await bcrypt.hash(password, 10);
-        const newUser = { id: Date.now(), email, passwordHash, role, name: name || 'Usuario' };
-        db.users.push(newUser);
+const allow = (...roles) => (req, res, next) => roles.includes(req.user.role)
+  ? next() : res.status(403).json({ error: 'Insufficient permissions' });
 
-        const token = jwt.sign({ id: newUser.id, role: newUser.role, email: newUser.email }, JWT_SECRET, { expiresIn: '1d' });
-        res.status(201).json({ message: 'Usuario registrado con éxito', token, user: { id: newUser.id, email, role, name: newUser.name } });
-    } catch (err) {
-        res.status(500).json({ error: 'Error interno del servidor' });
+app.get('/api/health', async (_req, res, next) => {
+  try { await pool.query('SELECT 1'); res.json({ status: 'ok' }); } catch (e) { next(e); }
+});
+
+app.post('/api/auth/register', async (req, res, next) => {
+  try {
+    const email = cleanEmail(req.body.email);
+    const password = String(req.body.password || '');
+    const name = String(req.body.name || '').trim();
+    const role = req.body.role === 'provider' ? 'provider' : 'client';
+    if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {
+      return res.status(400).json({ error: 'Check name, email, and password (minimum 8 characters)' });
     }
+    const hash = await bcrypt.hash(password, 12);
+    const { rows } = await pool.query(
+      'INSERT INTO users(email,password_hash,role,name) VALUES($1,$2,$3,$4) RETURNING id,email,role,name',
+      [email, hash, role, name]
+    );
+    const user = rows[0];
+    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
+    res.status(201).json({ token, user: publicUser(user) });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });
+    next(e);
+  }
 });
 
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        const user = db.users.find(u => u.email === email);
-        if (!user) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-
-        const validPass = await bcrypt.compare(password, user.passwordHash);
-        if (!validPass) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-
-        const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: '1d' });
-        res.json({ token, user: { id: user.id, email: user.email, role: user.role, name: user.name } });
-    } catch (err) {
-        res.status(500).json({ error: 'Error al iniciar sesión' });
+app.post('/api/auth/login', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM users WHERE email=$1', [cleanEmail(req.body.email)]);
+    const user = rows[0];
+    if (!user || !(await bcrypt.compare(String(req.body.password || ''), user.password_hash))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
+    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
+    res.json({ token, user: publicUser(user) });
+  } catch (e) { next(e); }
 });
 
-// Rutas de servicios y reservas
-app.get('/api/services', (req, res) => {
-    res.json(db.services);
+app.get('/api/services', async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT s.id,s.name,s.description AS desc,s.category AS cat,s.service_type AS type,
+      s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName"
+      FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE ORDER BY s.created_at DESC`);
+    res.json(rows);
+  } catch (e) { next(e); }
 });
 
-app.post('/api/bookings', (req, res) => {
-    const { serviceId, clientId, date } = req.body;
-    const service = db.services.find(s => s.id === serviceId);
-    if (!service) return res.status(404).json({ error: 'Servicio no encontrado' });
-
-    const totalPaid = service.price;
-    const commission = totalPaid * COMMISSION_RATE;
-    const providerEarnings = totalPaid - commission;
-
-    const newBooking = {
-        id: 'RES-' + Date.now(),
-        serviceId,
-        serviceName: service.name,
-        clientId,
-        date,
-        totalPaid,
-        commission,
-        providerEarnings,
-        status: 'pendiente',
-        created_at: new Date()
-    };
-
-    db.bookings.push(newBooking);
-    res.status(201).json({ message: 'Reserva realizada con éxito', booking: newBooking });
+app.post('/api/services', auth, allow('provider'), async (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const desc = String(req.body.desc || req.body.description || '').trim();
+    const cat = String(req.body.cat || req.body.category || '').trim();
+    const type = req.body.type === 'Presencial' ? 'Presencial' : 'Remoto';
+    const price = Number(req.body.price);
+    const hourly = Number(req.body.hourly || 0);
+    const area = String(req.body.area || 'Remoto').trim();
+    if (name.length < 3 || name.length > 120 || desc.length < 10 || desc.length > 1000 || !cat || !Number.isFinite(price) || price < 0 || !Number.isFinite(hourly) || hourly < 0) {
+      return res.status(400).json({ error: 'Invalid service data' });
+    }
+    const { rows } = await pool.query(`INSERT INTO services(provider_id,name,description,category,service_type,price,hourly_price,area)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area`,
+      [req.user.id, name, desc, cat, type, price, hourly, area]);
+    res.status(201).json(rows[0]);
+  } catch (e) { next(e); }
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Servidor ejecutándose en puerto ${PORT}`);
+app.post('/api/bookings', auth, allow('client'), async (req, res, next) => {
+  try {
+    const scheduledAt = new Date(req.body.date);
+    if (!Number.isInteger(Number(req.body.serviceId)) || Number.isNaN(scheduledAt.valueOf()) || scheduledAt <= new Date()) {
+      return res.status(400).json({ error: 'Invalid service or future date' });
+    }
+    const { rows: services } = await pool.query('SELECT id,price FROM services WHERE id=$1 AND active=TRUE', [req.body.serviceId]);
+    if (!services[0]) return res.status(404).json({ error: 'Service not found' });
+    const { rows } = await pool.query(`INSERT INTO bookings(service_id,client_id,scheduled_at,total)
+      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",scheduled_at AS date,total::float,status,created_at`,
+      [services[0].id, req.user.id, scheduledAt, services[0].price]);
+    res.status(201).json({ booking: rows[0] });
+  } catch (e) { next(e); }
 });
+
+app.get('/api/bookings/me', auth, async (req, res, next) => {
+  try {
+    const field = req.user.role === 'provider' ? 's.provider_id' : 'b.client_id';
+    const { rows } = await pool.query(`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,s.name AS "serviceName"
+      FROM bookings b JOIN services s ON s.id=b.service_id WHERE ${field}=$1 ORDER BY b.created_at DESC`, [req.user.id]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+app.use((_req, res) => res.status(404).json({ error: 'Route not found' }));
+app.use((err, _req, res, _next) => {
+  console.error(err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+initDb().then(() => app.listen(port, () => console.log(`SkillHub API listening on ${port}`)))
+  .catch((err) => { console.error(err); process.exit(1); });
+
+module.exports = app;
