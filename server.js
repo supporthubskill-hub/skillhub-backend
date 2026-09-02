@@ -1,131 +1,118 @@
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'skillhub_secret_key_2026';
 
-// --- CONFIGURACIÓN DE CORS ---
-const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:5173',
-];
-
-const corsOptions = {
-    origin: function (origin, callback) {
-        if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
-            callback(null, true);
-        } else {
-            callback(new Error('Bloqueado por la política de CORS'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-};
-
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json());
 
-// --- FILTRO DE LENGUAJE OFENSIVO (Multilingüe) ---
-const palabrasProhibidas = ['spam', 'scam', 'badword1', 'badword2'];
+// Base de datos temporal en memoria
+const db = {
+    users: [
+        {
+            id: 1,
+            email: 'support.hubskill@gmail.com',
+            passwordHash: bcrypt.hashSync('SkillHub2026!AdminSec', 10),
+            role: 'admin',
+            name: 'Admin SkillHub'
+        }
+    ],
+    services: [
+        {
+            id: 101,
+            providerName: "Carlos Pérez",
+            name: "Desarrollo Web Fullstack",
+            category: "Desarrollo",
+            price: 100,
+            rating: 4.9,
+            completedJobs: 28,
+            level: "Top Provider"
+        }
+    ],
+    bookings: []
+};
 
-function filtrarTexto(texto) {
-    if (!texto || typeof texto !== 'string') return texto;
-    let textoLimpio = texto;
-    palabrasProhibidas.forEach(palabra => {
-        const regex = new RegExp(palabra, 'gi');
-        textoLimpio = textoLimpio.replace(regex, '****');
-    });
-    return textoLimpio;
-}
+const COMMISSION_RATE = 0.10; // 10% de comisión de plataforma
 
-// Base de datos simulada en memoria
-let habilidades = [
-    { id: 1, title: 'Desarrollo Web Fullstack', category: 'Tecnología', price: 150, provider: 'admin@skillhub.com' }
-];
+// Rutas de autenticación
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { email, password, role, name } = req.body;
+        if (!email || !password || !role) {
+            return res.status(400).json({ error: 'Faltan campos obligatorios' });
+        }
+        
+        const existingUser = db.users.find(u => u.email === email);
+        if (existingUser) {
+            return res.status(400).json({ error: 'El usuario ya existe' });
+        }
 
-let ordenes = [];
+        const passwordHash = await bcrypt.hash(password, 10);
+        const newUser = { id: Date.now(), email, passwordHash, role, name: name || 'Usuario' };
+        db.users.push(newUser);
 
-// --- RUTAS DE LA API ---
-
-// Health Check (Vital para Render)
-app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'OK', message: 'SkillHub Backend Operativo 🚀' });
-});
-
-// Registro de Usuarios
-app.post('/api/auth/register', (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) {
-        return res.status(400).json({ success: false, message: 'Correo y contraseña obligatorios.' });
+        const token = jwt.sign({ id: newUser.id, role: newUser.role, email: newUser.email }, JWT_SECRET, { expiresIn: '1d' });
+        res.status(201).json({ message: 'Usuario registrado con éxito', token, user: { id: newUser.id, email, role, name: newUser.name } });
+    } catch (err) {
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
-    res.status(201).json({ success: true, message: 'Usuario registrado con éxito.', user: { email } });
 });
 
-// Gestión de Habilidades / Servicios
-app.get('/api/skills', (req, res) => {
-    res.status(200).json({ success: true, data: habilidades });
-});
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const user = db.users.find(u => u.email === email);
+        if (!user) {
+            return res.status(401).json({ error: 'Credenciales inválidas' });
+        }
 
-app.post('/api/skills', (req, res) => {
-    const { title, category, price, provider } = req.body;
-    if (!title || !price) {
-        return res.status(400).json({ success: false, message: 'Título y precio requeridos.' });
+        const validPass = await bcrypt.compare(password, user.passwordHash);
+        if (!validPass) {
+            return res.status(401).json({ error: 'Credenciales inválidas' });
+        }
+
+        const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: '1d' });
+        res.json({ token, user: { id: user.id, email: user.email, role: user.role, name: user.name } });
+    } catch (err) {
+        res.status(500).json({ error: 'Error al iniciar sesión' });
     }
-    
-    const nuevaHabilidad = {
-        id: habilidades.length + 1,
-        title: filtrarTexto(title),
-        category,
-        price,
-        provider
+});
+
+// Rutas de servicios y reservas
+app.get('/api/services', (req, res) => {
+    res.json(db.services);
+});
+
+app.post('/api/bookings', (req, res) => {
+    const { serviceId, clientId, date } = req.body;
+    const service = db.services.find(s => s.id === serviceId);
+    if (!service) return res.status(404).json({ error: 'Servicio no encontrado' });
+
+    const totalPaid = service.price;
+    const commission = totalPaid * COMMISSION_RATE;
+    const providerEarnings = totalPaid - commission;
+
+    const newBooking = {
+        id: 'RES-' + Date.now(),
+        serviceId,
+        serviceName: service.name,
+        clientId,
+        date,
+        totalPaid,
+        commission,
+        providerEarnings,
+        status: 'pendiente',
+        created_at: new Date()
     };
 
-    habilidades.push(nuevaHabilidad);
-    res.status(201).json({ success: true, message: 'Habilidad publicada con éxito', data: nuevaHabilidad });
+    db.bookings.push(newBooking);
+    res.status(201).json({ message: 'Reserva realizada con éxito', booking: newBooking });
 });
 
-// Órdenes y Comisiones Personalizadas
-app.post('/api/orders', (req, res) => {
-    const { skillId, clientEmail, customCommission } = req.body;
-    const nuevaOrden = {
-        id: ordenes.length + 1,
-        skillId,
-        clientEmail,
-        customCommission: filtrarTexto(customCommission) || 'Estándar',
-        status: 'Pendiente',
-        createdAt: new Date()
-    };
-    ordenes.push(nuevaOrden);
-    res.status(201).json({ success: true, message: 'Orden generada con éxito', data: nuevaOrden });
-});
-
-// Soporte Oficial (support.hubskill@gmail.com)
-app.post('/api/support', (req, res) => {
-    const { userEmail, message } = req.body;
-    if (!message) {
-        return res.status(400).json({ success: false, message: 'El mensaje no puede estar vacío.' });
-    }
-    
-    const mensajeLimpio = filtrarTexto(message);
-    console.log(`[SOPORTE SkillHub -> support.hubskill@gmail.com] De: ${userEmail} | Mensaje: ${mensajeLimpio}`);
-    
-    res.status(200).json({ 
-        success: true, 
-        message: 'Mensaje enviado a soporte (support.hubskill@gmail.com) exitosamente.' 
-    });
-});
-
-// --- PUERTO DINÁMICO ---
-const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-    console.log(`Servidor corriendo en el puerto ${PORT}`);
-});
-
-// --- MANEJO GLOBAL DE ERRORES ---
-app.use((err, req, res, next) => {
-    console.error('Error crítico detectado:', err.stack);
-    res.status(500).json({
-        success: false,
-        message: 'Ocurrió un error interno en el servidor de SkillHub.'
-    });
+    console.log(`🚀 Servidor ejecutándose en puerto ${PORT}`);
 });
