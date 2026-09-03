@@ -135,6 +135,15 @@ async function initDb() {
       body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 1000),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS admin_actions (
+      id BIGSERIAL PRIMARY KEY,
+      admin_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id BIGINT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 
@@ -599,11 +608,43 @@ app.get('/api/admin/services', auth, allow('admin'), async (req, res, next) => {
 
 app.delete('/api/admin/services/:id', auth, allow('admin'), async (req, res, next) => {
   try {
+    const reason = String(req.body.reason || '').trim().slice(0,200);
+    if (reason.length < 3) return res.status(400).json({ error: 'Debes indicar un motivo para retirar el servicio' });
     const { rows } = await pool.query(`UPDATE services SET active=FALSE WHERE id=$1 AND active=TRUE
       RETURNING id,name,provider_id AS "providerId",active`, [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Servicio no encontrado o ya eliminado' });
     await pool.query('UPDATE availability SET available=FALSE WHERE service_id=$1 AND available=TRUE', [req.params.id]);
-    res.json({ ...rows[0], removed: true });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,'service_removed','service',$2,$3)`, [req.user.id, req.params.id, reason]);
+    res.json({ ...rows[0], removed: true, reason });
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/admin/services/:id/restore', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const reason = String(req.body.reason || 'Restaurado por administrador').trim().slice(0,200);
+    const { rows } = await pool.query(`UPDATE services SET active=TRUE WHERE id=$1 AND active=FALSE
+      RETURNING id,name,provider_id AS "providerId",active`, [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Servicio no encontrado o ya está activo' });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,'service_restored','service',$2,$3)`, [req.user.id, req.params.id, reason]);
+    res.json({ ...rows[0], restored: true });
+  } catch (e) { next(e); }
+});
+
+app.get('/api/admin/users/:id/details', auth, allow('admin'), async (req, res, next) => {
+  try {
+    const { rows: users } = await pool.query(`SELECT id,name,email,role,account_status AS "accountStatus",identity_status AS "identityStatus",
+      email_verified AS "emailVerified",phone_verified AS "phoneVerified",headline,bio,skills,languages,location,experience,portfolio_url AS "portfolioUrl",created_at AS "createdAt"
+      FROM users WHERE id=$1`, [req.params.id]);
+    if (!users[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    const { rows: services } = await pool.query(`SELECT id,name,category,active,created_at AS "createdAt",
+      (SELECT COUNT(*)::int FROM bookings b WHERE b.service_id=services.id) AS "bookingCount"
+      FROM services WHERE provider_id=$1 ORDER BY created_at DESC LIMIT 100`, [req.params.id]);
+    const { rows: bookings } = await pool.query(`SELECT b.id,b.status,b.scheduled_at AS "scheduledAt",s.name AS "serviceName",
+      CASE WHEN b.client_id=$1 THEN 'client' ELSE 'provider' END AS perspective
+      FROM bookings b JOIN services s ON s.id=b.service_id
+      WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC LIMIT 30`, [req.params.id]);
+    const { rows: reports } = await pool.query(`SELECT id,reason,status,created_at AS "createdAt" FROM reports WHERE target_user_id=$1 ORDER BY created_at DESC LIMIT 30`, [req.params.id]);
+    res.json({ user: users[0], services, bookings, reports });
   } catch (e) { next(e); }
 });
 
