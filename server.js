@@ -554,6 +554,8 @@ app.patch('/api/admin/verifications/:id', auth, allow('admin'), async (req, res,
     const { rows } = await pool.query(`UPDATE users SET identity_status=$1 WHERE id=$2 AND role='user'
       RETURNING id,name,email,identity_status AS "identityStatus"`, [status, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,$2,'user',$3,$4)`,
+      [req.user.id, status === 'verified' ? 'verification_approved' : 'verification_rejected', req.params.id, status === 'verified' ? 'Verificación aprobada' : 'Verificación rechazada']);
     res.json(rows[0]);
   } catch (e) { next(e); }
 });
@@ -595,13 +597,16 @@ app.patch('/api/admin/disputes/:id', auth, allow('admin'), async (req, res, next
 app.get('/api/admin/services', auth, allow('admin'), async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim().slice(0,100);
+    const state = String(req.query.state || 'all');
+    if (!['all','active','removed'].includes(state)) return res.status(400).json({ error: 'Filtro de servicio inválido' });
     const pattern = `%${q}%`;
     const { rows } = await pool.query(`SELECT s.id,s.name,s.category,s.area,s.active,s.created_at AS "createdAt",
       u.id AS "providerId",u.name AS "providerName",u.email AS "providerEmail",
       (SELECT COUNT(*)::int FROM bookings b WHERE b.service_id=s.id) AS "bookingCount"
       FROM services s JOIN users u ON u.id=s.provider_id
       WHERE ($1='' OR s.name ILIKE $2 OR u.name ILIKE $2 OR u.email ILIKE $2)
-      ORDER BY s.created_at DESC LIMIT 300`, [q, pattern]);
+        AND ($3='all' OR ($3='active' AND s.active=TRUE) OR ($3='removed' AND s.active=FALSE))
+      ORDER BY s.created_at DESC LIMIT 300`, [q, pattern, state]);
     res.json(rows);
   } catch (e) { next(e); }
 });
@@ -630,6 +635,14 @@ app.patch('/api/admin/services/:id/restore', auth, allow('admin'), async (req, r
   } catch (e) { next(e); }
 });
 
+app.get('/api/admin/activity', auth, allow('admin'), async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT a.id,a.action,a.target_type AS "targetType",a.target_id AS "targetId",a.reason,a.created_at AS "createdAt",
+      u.name AS "adminName" FROM admin_actions a JOIN users u ON u.id=a.admin_id ORDER BY a.created_at DESC LIMIT 50`);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
 app.get('/api/admin/users/:id/details', auth, allow('admin'), async (req, res, next) => {
   try {
     const { rows: users } = await pool.query(`SELECT id,name,email,role,account_status AS "accountStatus",identity_status AS "identityStatus",
@@ -651,12 +664,17 @@ app.get('/api/admin/users/:id/details', auth, allow('admin'), async (req, res, n
 app.get('/api/admin/users', auth, allow('admin'), async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim().slice(0,100);
+    const account = String(req.query.account || 'all');
+    const verification = String(req.query.verification || 'all');
+    if (!['all','active','suspended'].includes(account) || !['all','verified','pending','unverified','rejected'].includes(verification))
+      return res.status(400).json({ error: 'Filtro de usuario inválido' });
     const pattern = `%${q}%`;
     const { rows } = await pool.query(`SELECT u.id,u.name,u.email,u.role,u.account_status AS "accountStatus",
       u.identity_status AS "identityStatus",u.created_at AS "createdAt",
       (SELECT COUNT(*)::int FROM services s WHERE s.provider_id=u.id) AS "serviceCount"
       FROM users u WHERE ($1='' OR u.name ILIKE $2 OR u.email ILIKE $2)
-      ORDER BY u.created_at DESC LIMIT 200`, [q, pattern]);
+        AND ($3='all' OR u.account_status=$3) AND ($4='all' OR u.identity_status=$4)
+      ORDER BY u.created_at DESC LIMIT 200`, [q, pattern, account, verification]);
     res.json(rows);
   } catch (e) { next(e); }
 });
@@ -664,11 +682,15 @@ app.get('/api/admin/users', auth, allow('admin'), async (req, res, next) => {
 app.patch('/api/admin/users/:id/status', auth, allow('admin'), async (req, res, next) => {
   try {
     const status = String(req.body.status || '');
+    const reason = String(req.body.reason || '').trim().slice(0,200);
     if (!['active','suspended'].includes(status)) return res.status(400).json({ error: 'Estado de cuenta inválido' });
+    if (status === 'suspended' && reason.length < 3) return res.status(400).json({ error: 'Debes indicar un motivo para suspender la cuenta' });
     if (String(req.params.id) === String(req.user.id)) return res.status(400).json({ error: 'No puedes suspender tu propia cuenta admin' });
     const { rows } = await pool.query(`UPDATE users SET account_status=$1 WHERE id=$2 AND role='user'
       RETURNING id,name,email,account_status AS "accountStatus"`, [status, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,$2,'user',$3,$4)`,
+      [req.user.id, status === 'suspended' ? 'user_suspended' : 'user_reactivated', req.params.id, reason || 'Cuenta reactivada por administrador']);
     res.json(rows[0]);
   } catch (e) { next(e); }
 });
