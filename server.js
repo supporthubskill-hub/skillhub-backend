@@ -563,12 +563,16 @@ app.patch('/api/admin/verifications/:id', auth, allow('admin'), async (req, res,
 app.get('/api/admin/cases', auth, allow('admin'), async (_req, res, next) => {
   try {
     const { rows: reports } = await pool.query(`SELECT r.id,'report' AS type,r.reason,r.details,r.status,r.created_at AS "createdAt",
+      r.reporter_id AS "openedById",r.target_user_id AS "targetUserId",r.service_id AS "serviceId",
       reporter.name AS "openedByName",target.name AS "targetName",s.name AS "serviceName"
       FROM reports r JOIN users reporter ON reporter.id=r.reporter_id
       LEFT JOIN users target ON target.id=r.target_user_id LEFT JOIN services s ON s.id=r.service_id
       ORDER BY r.created_at DESC LIMIT 200`);
     const { rows: disputes } = await pool.query(`SELECT d.id,'dispute' AS type,d.booking_id AS "bookingId",d.reason,d.details,d.status,d.created_at AS "createdAt",
-      u.name AS "openedByName" FROM disputes d JOIN users u ON u.id=d.opened_by
+      d.opened_by AS "openedById",u.name AS "openedByName",b.client_id AS "clientId",client.name AS "clientName",
+      s.provider_id AS "providerId",provider.name AS "providerName",s.id AS "serviceId",s.name AS "serviceName"
+      FROM disputes d JOIN users u ON u.id=d.opened_by JOIN bookings b ON b.id=d.booking_id
+      JOIN services s ON s.id=b.service_id JOIN users client ON client.id=b.client_id JOIN users provider ON provider.id=s.provider_id
       ORDER BY d.created_at DESC LIMIT 200`);
     res.json({ reports, disputes });
   } catch (e) { next(e); }
@@ -580,6 +584,8 @@ app.patch('/api/admin/reports/:id', auth, allow('admin'), async (req, res, next)
     if (!['open','reviewing','resolved','dismissed'].includes(status)) return res.status(400).json({ error: 'Estado inválido' });
     const { rows } = await pool.query('UPDATE reports SET status=$1 WHERE id=$2 RETURNING id,status', [status, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Reporte no encontrado' });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,$2,'report',$3,$4)`,
+      [req.user.id, 'report_'+status, req.params.id, 'Estado del reporte cambiado a '+status]);
     res.json(rows[0]);
   } catch (e) { next(e); }
 });
@@ -590,6 +596,8 @@ app.patch('/api/admin/disputes/:id', auth, allow('admin'), async (req, res, next
     if (!['open','reviewing','resolved','dismissed'].includes(status)) return res.status(400).json({ error: 'Estado inválido' });
     const { rows } = await pool.query('UPDATE disputes SET status=$1 WHERE id=$2 RETURNING id,status', [status, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Disputa no encontrada' });
+    await pool.query(`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason) VALUES($1,$2,'dispute',$3,$4)`,
+      [req.user.id, 'dispute_'+status, req.params.id, 'Estado de la disputa cambiado a '+status]);
     res.json(rows[0]);
   } catch (e) { next(e); }
 });
