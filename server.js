@@ -241,27 +241,77 @@ app.get('/api/services', async (_req, res, next) => {
       s.price::float,s.hourly_price::float AS hourly,s.area,u.name AS "providerName",u.id AS "providerId",
       COALESCE((SELECT ROUND(AVG(r.rating)::numeric,1)::float FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id),0) AS rating,
       (SELECT COUNT(*)::int FROM reviews r JOIN bookings b ON b.id=r.booking_id WHERE b.service_id=s.id) AS "reviewCount"
-      FROM services s JOIN users u ON u.id=s.provider_id WHERE s.active=TRUE AND u.account_status='active' ORDER BY s.created_at DESC`);
+      FROM services s JOIN users u ON u.id=s.provider_id
+      WHERE s.active=TRUE AND u.account_status='active'
+        AND EXISTS (SELECT 1 FROM availability a WHERE a.service_id=s.id AND a.available=TRUE AND a.starts_at>NOW())
+      ORDER BY s.created_at DESC`);
     res.json(rows);
   } catch (e) { next(e); }
 });
 
+app.get('/api/services/me', auth, allow('user'), async (req, res, next) => {
+  try {
+    const [{ rows }, { rows: usage }] = await Promise.all([
+      pool.query(`SELECT s.id,s.name,s.description AS desc,s.category AS cat,s.service_type AS type,
+        s.price::float,s.hourly_price::float AS hourly,s.area,s.active,s.created_at AS "createdAt",
+        EXISTS (SELECT 1 FROM availability a WHERE a.service_id=s.id AND a.available=TRUE AND a.starts_at>NOW()) AS "hasAvailability"
+        FROM services s WHERE s.provider_id=$1 ORDER BY s.created_at DESC`, [req.user.id]),
+      pool.query(`SELECT COUNT(*)::int AS used FROM services WHERE provider_id=$1 AND created_at >= NOW() - INTERVAL '24 hours'`, [req.user.id])
+    ]);
+    const used = usage[0]?.used || 0;
+    res.json({ services: rows, limit: { max: 5, used, remaining: Math.max(0, 5-used) } });
+  } catch (e) { next(e); }
+});
+
+function readServiceInput(req) {
+  return {
+    name: String(req.body.name || '').trim(),
+    desc: String(req.body.desc || req.body.description || '').trim(),
+    cat: String(req.body.cat || req.body.category || '').trim(),
+    type: req.body.type === 'Presencial' ? 'Presencial' : 'Remoto',
+    price: Number(req.body.price),
+    hourly: Number(req.body.hourly || 0),
+    area: String(req.body.area || 'Remoto').trim()
+  };
+}
+
+function validServiceInput(v) {
+  return v.name.length >= 3 && v.name.length <= 120 && v.desc.length >= 10 && v.desc.length <= 1000 &&
+    v.cat.length >= 1 && v.cat.length <= 100 && Number.isFinite(v.price) && v.price >= 0 &&
+    Number.isFinite(v.hourly) && v.hourly >= 0 && v.area.length <= 150;
+}
+
 app.post('/api/services', auth, allow('user'), async (req, res, next) => {
   try {
-    const name = String(req.body.name || '').trim();
-    const desc = String(req.body.desc || req.body.description || '').trim();
-    const cat = String(req.body.cat || req.body.category || '').trim();
-    const type = req.body.type === 'Presencial' ? 'Presencial' : 'Remoto';
-    const price = Number(req.body.price);
-    const hourly = Number(req.body.hourly || 0);
-    const area = String(req.body.area || 'Remoto').trim();
-    if (name.length < 3 || name.length > 120 || desc.length < 10 || desc.length > 1000 || !cat || !Number.isFinite(price) || price < 0 || !Number.isFinite(hourly) || hourly < 0) {
-      return res.status(400).json({ error: 'Invalid service data' });
-    }
-    const { rows } = await pool.query(`INSERT INTO services(provider_id,name,description,category,service_type,price,hourly_price,area)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area`,
-      [req.user.id, name, desc, cat, type, price, hourly, area]);
-    res.status(201).json(rows[0]);
+    const v = readServiceInput(req);
+    if (!validServiceInput(v)) return res.status(400).json({ error: 'Revisa los datos del servicio' });
+    const created = await withTransaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [Number(req.user.id)]);
+      const { rows: usage } = await client.query(`SELECT COUNT(*)::int AS used FROM services
+        WHERE provider_id=$1 AND created_at >= NOW() - INTERVAL '24 hours'`, [req.user.id]);
+      if ((usage[0]?.used || 0) >= 5) return null;
+      const { rows } = await client.query(`INSERT INTO services(provider_id,name,description,category,service_type,price,hourly_price,area)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area,active,created_at AS "createdAt"`,
+        [req.user.id, v.name, v.desc, v.cat, v.type, v.price, v.hourly, v.area]);
+      return rows[0];
+    });
+    if (!created) return res.status(429).json({ error: 'Puedes publicar un máximo de 5 servicios cada 24 horas' });
+    res.status(201).json({ ...created, hasAvailability: false });
+  } catch (e) { next(e); }
+});
+
+app.patch('/api/services/:id', auth, allow('user'), async (req, res, next) => {
+  try {
+    const v = readServiceInput(req);
+    if (!validServiceInput(v)) return res.status(400).json({ error: 'Revisa los datos del servicio' });
+    const { rows } = await pool.query(`UPDATE services SET name=$1,description=$2,category=$3,service_type=$4,price=$5,hourly_price=$6,area=$7
+      WHERE id=$8 AND provider_id=$9
+      RETURNING id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area,active,created_at AS "createdAt"`,
+      [v.name,v.desc,v.cat,v.type,v.price,v.hourly,v.area,req.params.id,req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Servicio no encontrado' });
+    const { rows: slots } = await pool.query(`SELECT EXISTS (SELECT 1 FROM availability WHERE service_id=$1 AND available=TRUE AND starts_at>NOW()) AS ready`, [req.params.id]);
+    res.json({ ...rows[0], hasAvailability: Boolean(slots[0]?.ready) });
   } catch (e) { next(e); }
 });
 
@@ -283,6 +333,15 @@ app.get('/api/availability/me', auth, allow('user'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+async function availabilityConflict(client, providerId, startsAt, duration, excludeId = null) {
+  const { rows } = await client.query(`SELECT 1 FROM availability
+    WHERE provider_id=$1 AND starts_at>NOW() AND ($4::bigint IS NULL OR id<>$4)
+      AND starts_at < $2::timestamptz + ($3::int * INTERVAL '1 minute')
+      AND starts_at + (duration_minutes * INTERVAL '1 minute') > $2::timestamptz
+    LIMIT 1`, [providerId, startsAt, duration, excludeId]);
+  return Boolean(rows[0]);
+}
+
 app.post('/api/availability', auth, allow('user'), async (req, res, next) => {
   try {
     const serviceId = Number(req.body.serviceId);
@@ -290,14 +349,49 @@ app.post('/api/availability', auth, allow('user'), async (req, res, next) => {
     const duration = Number(req.body.durationMinutes || 60);
     if (!Number.isInteger(serviceId) || Number.isNaN(startsAt.valueOf()) || startsAt <= new Date() ||
         !Number.isInteger(duration) || duration < 15 || duration > 480) {
+      return res.status(400).json({ error: 'Horario inválido. Elige una fecha futura y una duración entre 15 y 480 minutos' });
+    }
+    const created = await withTransaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [Number(req.user.id)]);
+      const { rows: owned } = await client.query('SELECT 1 FROM services WHERE id=$1 AND provider_id=$2', [serviceId, req.user.id]);
+      if (!owned[0]) return { forbidden: true };
+      if (await availabilityConflict(client, req.user.id, startsAt, duration)) return { conflict: true };
+      const { rows } = await client.query(`INSERT INTO availability(service_id,provider_id,starts_at,duration_minutes)
+        VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",starts_at AS "startsAt",duration_minutes AS "durationMinutes",available`,
+        [serviceId, req.user.id, startsAt, duration]);
+      return { slot: rows[0] };
+    });
+    if (created.forbidden) return res.status(403).json({ error: 'Solo el propietario puede añadir horarios' });
+    if (created.conflict) return res.status(409).json({ error: 'Ese horario se cruza con otra disponibilidad o reservación tuya' });
+    res.status(201).json(created.slot);
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Ese horario ya existe' });
+    next(e);
+  }
+});
+
+app.patch('/api/availability/:id', auth, allow('user'), async (req, res, next) => {
+  try {
+    const startsAt = new Date(req.body.startsAt);
+    const duration = Number(req.body.durationMinutes || 60);
+    if (Number.isNaN(startsAt.valueOf()) || startsAt <= new Date() || !Number.isInteger(duration) || duration < 15 || duration > 480) {
       return res.status(400).json({ error: 'Horario inválido' });
     }
-    const { rows: owned } = await pool.query('SELECT 1 FROM services WHERE id=$1 AND provider_id=$2', [serviceId, req.user.id]);
-    if (!owned[0]) return res.status(403).json({ error: 'Solo el propietario puede añadir horarios' });
-    const { rows } = await pool.query(`INSERT INTO availability(service_id,provider_id,starts_at,duration_minutes)
-      VALUES($1,$2,$3,$4) RETURNING id,service_id AS "serviceId",starts_at AS "startsAt",duration_minutes AS "durationMinutes",available`,
-      [serviceId, req.user.id, startsAt, duration]);
-    res.status(201).json(rows[0]);
+    const result = await withTransaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [Number(req.user.id)]);
+      const { rows: current } = await client.query(`SELECT id,available FROM availability WHERE id=$1 AND provider_id=$2`, [req.params.id, req.user.id]);
+      if (!current[0]) return { missing: true };
+      if (!current[0].available) return { reserved: true };
+      if (await availabilityConflict(client, req.user.id, startsAt, duration, req.params.id)) return { conflict: true };
+      const { rows } = await client.query(`UPDATE availability SET starts_at=$1,duration_minutes=$2 WHERE id=$3 AND provider_id=$4 AND available=TRUE
+        RETURNING id,service_id AS "serviceId",starts_at AS "startsAt",duration_minutes AS "durationMinutes",available`,
+        [startsAt,duration,req.params.id,req.user.id]);
+      return { slot: rows[0] };
+    });
+    if (result.missing) return res.status(404).json({ error: 'Horario no encontrado' });
+    if (result.reserved) return res.status(409).json({ error: 'No puedes editar un horario que ya fue reservado' });
+    if (result.conflict) return res.status(409).json({ error: 'Ese horario se cruza con otra disponibilidad o reservación tuya' });
+    res.json(result.slot);
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'Ese horario ya existe' });
     next(e);
