@@ -1,0 +1,1 @@
+Dockerfile now copies server.js and scripts/ before npm ci.
