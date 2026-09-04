@@ -29,6 +29,7 @@ jobs:
           git config user.name "SkillHub Automation"
           git config user.email "actions@users.noreply.github.com"
           git rm scripts/apply-email-verification.py .github/workflows/apply-email-verification.yml
-          git add server.js package.json package-lock.json .env.example
+          rm -f scripts/trigger-email-verification.txt
+          git add -A
           git commit -m "Add secure email verification codes"
           git push origin HEAD:chatgpt/email-verification
