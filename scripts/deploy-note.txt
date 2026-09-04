@@ -1,0 +1,1 @@
+Expected build: npm postinstall prints Zeqviro server patch applied during build, then the container starts through scripts/start.js.
