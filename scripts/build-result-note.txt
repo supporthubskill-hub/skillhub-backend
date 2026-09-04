@@ -1,0 +1,1 @@
+After postinstall, server.js contains the commission settings implementation and scripts/start.js loads it directly.
