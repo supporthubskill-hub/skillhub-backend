@@ -1,0 +1,1 @@
+This change only changes Docker build ordering; payment mode remains test_only and enabled remains false.
