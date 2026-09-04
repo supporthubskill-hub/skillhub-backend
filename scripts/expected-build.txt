@@ -1,0 +1,1 @@
+Expected: npm ci -> postinstall -> Zeqviro server patch applied during build -> image completes.
