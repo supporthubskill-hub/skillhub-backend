@@ -1,0 +1,1 @@
+The install hook patches the copied server.js before the final COPY . . layer.
