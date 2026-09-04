@@ -1,0 +1,1 @@
+Commission configuration remains beta/test-only; this build fix does not enable real payments.
