@@ -1,0 +1,34 @@
+name: Apply email verification
+
+on:
+  push:
+    branches:
+      - chatgpt/email-verification
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/email-verification
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Apply patch
+        run: python3 scripts/apply-email-verification.py
+      - name: Install dependencies and refresh lockfile
+        run: npm install --ignore-scripts
+      - name: Validate backend syntax
+        run: npm run check
+      - name: Commit final implementation and remove helper files
+        run: |
+          git config user.name "SkillHub Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm scripts/apply-email-verification.py .github/workflows/apply-email-verification.yml
+          git add server.js package.json package-lock.json .env.example
+          git commit -m "Add secure email verification codes"
+          git push origin HEAD:chatgpt/email-verification
