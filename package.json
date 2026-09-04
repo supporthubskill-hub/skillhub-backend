@@ -6,9 +6,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "postinstall": "node scripts/build-runtime-server.js && node scripts/apply-preregistration-verification.js && node scripts/apply-password-recovery.js && node scripts/apply-booking-request-flow.js && node scripts/add-rejection-controls.js && node scripts/add-admin-notifications.js && node scripts/add-provider-service-controls.js && node scripts/add-admin-user-warnings.js && node scripts/add-admin-sanctions.js && node scripts/add-reports-trust.js",
+    "postinstall": "node scripts/build-runtime-server.js && node scripts/apply-preregistration-verification.js && node scripts/apply-password-recovery.js && node scripts/apply-booking-request-flow.js && node scripts/add-rejection-controls.js && node scripts/add-admin-notifications.js && node scripts/add-provider-service-controls.js && node scripts/add-admin-user-warnings.js && node scripts/add-admin-sanctions.js && node scripts/add-reports-trust.js && node scripts/add-age-privacy.js",
     "start": "node scripts/start.js",
-    "check": "node --check server.js && node --check scripts/start.js && node --check scripts/build-runtime-server.js && node --check scripts/apply-preregistration-verification.js && node --check scripts/apply-password-recovery.js && node --check scripts/apply-booking-request-flow.js && node --check scripts/add-rejection-controls.js && node --check scripts/add-admin-notifications.js && node --check scripts/add-provider-service-controls.js && node --check scripts/add-admin-user-warnings.js && node --check scripts/add-admin-sanctions.js && node --check scripts/add-reports-trust.js",
+    "check": "node --check server.js && node --check scripts/start.js && node --check scripts/build-runtime-server.js && node --check scripts/apply-preregistration-verification.js && node --check scripts/apply-password-recovery.js && node --check scripts/apply-booking-request-flow.js && node --check scripts/add-rejection-controls.js && node --check scripts/add-admin-notifications.js && node --check scripts/add-provider-service-controls.js && node --check scripts/add-admin-user-warnings.js && node --check scripts/add-admin-sanctions.js && node --check scripts/add-reports-trust.js && node --check scripts/add-age-privacy.js",
     "test:beta": "node scripts/beta-smoke-test.js",
     "admin:promote": "node scripts/promote-admin.js"
   },
