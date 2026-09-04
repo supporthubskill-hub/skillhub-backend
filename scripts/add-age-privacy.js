@@ -18,8 +18,8 @@ const accountStatusColumn = "    ALTER TABLE users ADD COLUMN IF NOT EXISTS acco
 const ageColumns = `${accountStatusColumn}\n    ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;\n    ALTER TABLE users ADD COLUMN IF NOT EXISTS age_band TEXT;\n    ALTER TABLE users ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT 'OTHER';\n    ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMPTZ;\n    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_age_band_check;\n    ALTER TABLE users ADD CONSTRAINT users_age_band_check CHECK (age_band IS NULL OR age_band IN ('14_15','16_17','18_plus'));`;
 replaceOnce(accountStatusColumn, ageColumns, 'user age/privacy columns');
 
-const authSelect = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified FROM users WHERE id=$1', [payload.id]);";
-const authSelectNew = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified,age_band FROM users WHERE id=$1', [payload.id]);";
+const authSelect = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified,suspended_until,suspension_reason FROM users WHERE id=$1', [payload.id]);";
+const authSelectNew = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified,suspended_until,suspension_reason,age_band FROM users WHERE id=$1', [payload.id]);";
 replaceOnce(authSelect, authSelectNew, 'auth user age band');
 
 const oldRegister = `app.post('/api/auth/register', async (req, res, next) => {
