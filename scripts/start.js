@@ -1,6 +1,12 @@
 require('dotenv').config();
 const { Pool } = require('pg');
 
+const BRAND_NAME = 'Zeqviro';
+const LEGACY_BRAND_NAME = 'SkillHub';
+const applyBrand = (value) => typeof value === 'string'
+  ? value.replaceAll(LEGACY_BRAND_NAME, BRAND_NAME)
+  : value;
+
 function enableResendMailTransport() {
   const apiKey = String(process.env.RESEND_API_KEY || '').trim();
   if (!apiKey) return;
@@ -23,9 +29,9 @@ function enableResendMailTransport() {
         body: JSON.stringify({
           from,
           to: Array.isArray(message.to) ? message.to : [message.to],
-          subject: message.subject,
-          text: message.text,
-          html: message.html
+          subject: applyBrand(message.subject),
+          text: applyBrand(message.text),
+          html: applyBrand(message.html)
         }),
         signal: AbortSignal.timeout(12000)
       });
@@ -66,7 +72,7 @@ async function promoteConfiguredAdmin() {
     if (rows[0]) {
       console.log(`Admin startup promotion confirmed for ${rows[0].email}`);
     } else {
-      console.warn(`ADMIN_EMAIL is configured, but no matching SkillHub account exists for ${email}`);
+      console.warn(`ADMIN_EMAIL is configured, but no matching ${BRAND_NAME} account exists for ${email}`);
     }
   } finally {
     await pool.end();
