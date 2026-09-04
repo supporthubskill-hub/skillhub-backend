@@ -1,0 +1,1 @@
+COPY . . must happen before RUN npm ci because npm ci invokes the repository postinstall script.
