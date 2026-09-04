@@ -1,0 +1,1 @@
+If the build succeeds, runtime should log Email verification delivery: Resend API enabled and Zeqviro API listening on the Render port.
