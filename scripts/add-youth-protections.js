@@ -26,8 +26,8 @@ const patchRoute = `app.patch('/api/services/:id', auth, allow('user'), async (r
 const patchRouteNew = `${patchRoute}\n    if (isYouthAccount(req.user) && v.type === 'Presencial') return res.status(403).json({ error: YOUTH_REMOTE_ONLY_MESSAGE, code: 'YOUTH_REMOTE_ONLY' });`;
 replaceOnce(patchRoute, patchRouteNew, 'service edit restriction');
 
-const bookingServiceSelect = `    const { rows: services } = await client.query(\`SELECT s.id,s.price,s.provider_id FROM services s\n      JOIN users u ON u.id=s.provider_id WHERE s.id=$1 AND s.active=TRUE AND COALESCE(s.paused,FALSE)=FALSE AND u.account_status='active'\`, [req.body.serviceId]);`;
-const bookingServiceSelectNew = `    const { rows: services } = await client.query(\`SELECT s.id,s.price,s.provider_id,s.service_type,u.age_band AS provider_age_band FROM services s\n      JOIN users u ON u.id=s.provider_id WHERE s.id=$1 AND s.active=TRUE AND COALESCE(s.paused,FALSE)=FALSE AND u.account_status='active'\`, [req.body.serviceId]);`;
+const bookingServiceSelect = `    const { rows: services } = await client.query(\`SELECT s.id,s.name,s.price,s.provider_id FROM services s\n      JOIN users u ON u.id=s.provider_id WHERE s.id=$1 AND s.active=TRUE AND COALESCE(s.paused,FALSE)=FALSE AND u.account_status='active'\`, [req.body.serviceId]);`;
+const bookingServiceSelectNew = `    const { rows: services } = await client.query(\`SELECT s.id,s.name,s.price,s.provider_id,s.service_type,u.age_band AS provider_age_band FROM services s\n      JOIN users u ON u.id=s.provider_id WHERE s.id=$1 AND s.active=TRUE AND COALESCE(s.paused,FALSE)=FALSE AND u.account_status='active'\`, [req.body.serviceId]);`;
 replaceOnce(bookingServiceSelect, bookingServiceSelectNew, 'booking youth fields');
 
 const ownBookingCheck = `    if (String(services[0].provider_id) === String(req.user.id)) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'No puedes reservar tu propio servicio' }); }`;
