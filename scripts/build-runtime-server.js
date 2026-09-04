@@ -1,8 +1,9 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const sourcePath = path.join(__dirname, '..', 'server.js');
-const runtimePath = path.join(__dirname, '..', '.runtime-server.js');
+const runtimePath = path.join(os.tmpdir(), 'zeqviro-runtime-server.js');
 
 function replaceOrThrow(source, needle, replacement, label) {
   if (!source.includes(needle)) {
