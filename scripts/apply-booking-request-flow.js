@@ -52,5 +52,12 @@ source = replaceOrThrow(
   'accept reject and release slot'
 );
 
+source = replaceOrThrow(
+  source,
+  `    const { rows } = await pool.query(\`SELECT b.id,b.scheduled_at AS date,b.total::float,b.status,\n      b.payment_status AS \"paymentStatus\",b.platform_fee::float AS \"platformFee\",\n      b.provider_amount::float AS \"providerAmount\",s.name AS \"serviceName\",\n      CASE WHEN b.client_id=$1 THEN 'client' ELSE 'provider' END AS perspective\n      FROM bookings b JOIN services s ON s.id=b.service_id\n      WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC\`, [req.user.id]);`,
+  `    const { rows } = await pool.query(\`SELECT b.id,b.service_id AS \"serviceId\",b.scheduled_at AS date,b.total::float,b.status,\n      b.payment_status AS \"paymentStatus\",b.platform_fee::float AS \"platformFee\",\n      b.provider_amount::float AS \"providerAmount\",s.name AS \"serviceName\",\n      CASE WHEN b.client_id=$1 THEN 'client' ELSE 'provider' END AS perspective,\n      CASE WHEN b.client_id=$1 THEN s.provider_id ELSE b.client_id END AS \"otherUserId\",\n      CASE WHEN b.client_id=$1 THEN provider.name ELSE client.name END AS \"otherUserName\"\n      FROM bookings b JOIN services s ON s.id=b.service_id\n      JOIN users provider ON provider.id=s.provider_id JOIN users client ON client.id=b.client_id\n      WHERE b.client_id=$1 OR s.provider_id=$1 ORDER BY b.created_at DESC\`, [req.user.id]);`,
+  'booking chat participant data'
+);
+
 fs.writeFileSync(serverPath, source, 'utf8');
 console.log('Booking request/chat flow patch applied');
