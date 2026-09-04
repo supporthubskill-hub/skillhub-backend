@@ -22,10 +22,93 @@ const authSelect = "    const { rows } = await pool.query('SELECT id,email,role,
 const authSelectNew = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified,age_band FROM users WHERE id=$1', [payload.id]);";
 replaceOnce(authSelect, authSelectNew, 'auth user age band');
 
-const oldRegister = `app.post('/api/auth/register', async (req, res, next) => {\n  try {\n    const email = cleanEmail(req.body.email);\n    const password = String(req.body.password || '');\n    const name = String(req.body.name || '').trim();\n    const role = 'user';\n    if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {\n      return res.status(400).json({ error: 'Check name, email, and password (minimum 8 characters)' });\n    }\n    const hash = await bcrypt.hash(password, 12);\n    const { rows } = await pool.query(\n      'INSERT INTO users(email,password_hash,role,name) VALUES($1,$2,$3,$4) RETURNING id,email,role,name',\n      [email, hash, role, name]\n    );\n    const user = rows[0];\n    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });\n    res.status(201).json({ token, user: publicUser(user) });\n  } catch (e) {\n    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });\n    next(e);\n  }\n});`;
+const oldRegister = `app.post('/api/auth/register', async (req, res, next) => {
+  try {
+    const email = cleanEmail(req.body.email);
+    const password = String(req.body.password || '');
+    const name = String(req.body.name || '').trim();
+    const verificationToken = String(req.body.verificationToken || '').trim();
+    const role = 'user';
+    if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {
+      return res.status(400).json({ error: 'Revisa nombre, correo y contraseña (mínimo 8 caracteres).' });
+    }
+    if (!verificationToken) return res.status(403).json({ error: 'Debes verificar tu correo antes de crear la cuenta.' });
 
-const newRegister = `app.post('/api/auth/register', async (req, res, next) => {\n  try {\n    const email = cleanEmail(req.body.email);\n    const password = String(req.body.password || '');\n    const name = String(req.body.name || '').trim();\n    const birthDate = String(req.body.birthDate || '').trim();\n    const region = req.body.region === 'NY' ? 'NY' : 'OTHER';\n    const privacyAccepted = req.body.privacyAccepted === true;\n    const role = 'user';\n    const age = calculateAge(birthDate);\n    const ageBand = ageBandFor(age);\n\n    if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {\n      return res.status(400).json({ error: 'Check name, email, and password (minimum 8 characters)' });\n    }\n    if (!Number.isInteger(age) || age < 14 || age > 100 || !ageBand || ageBand === 'under_14') {\n      return res.status(400).json({ error: 'Durante la beta debes tener al menos 14 años para crear una cuenta.', code: 'AGE_NOT_ELIGIBLE' });\n    }\n    if (!privacyAccepted) {\n      return res.status(400).json({ error: 'Debes aceptar los Términos, Privacidad y Normas para crear la cuenta.', code: 'PRIVACY_CONSENT_REQUIRED' });\n    }\n\n    const privacyAcceptedAt = new Date().toISOString();\n    const hash = await bcrypt.hash(password, 12);\n    const { rows } = await pool.query(\n      'INSERT INTO users(email,password_hash,role,name,birth_date,age_band,region,privacy_accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,email,role,name,email_verified,age_band',\n      [email, hash, role, name, birthDate, ageBand, region, privacyAcceptedAt]\n    );\n    const user = rows[0];\n    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });\n    res.status(201).json({ token, user: publicUser(user) });\n  } catch (e) {\n    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });\n    next(e);\n  }\n});`;
-replaceOnce(oldRegister, newRegister, 'registration route');
+    const hash = await bcrypt.hash(password, 12);
+    const user = await withTransaction(async (client) => {
+      const { rows: verificationRows } = await client.query('SELECT * FROM preregistration_email_codes WHERE email=$1 FOR UPDATE', [email]);
+      const verification = verificationRows[0];
+      if (!verification || !verification.verified_at || !verification.token_expires_at) return null;
+      if (new Date(verification.token_expires_at).getTime() < Date.now()) return null;
+      if (verification.verification_token_hash !== hashRegistrationSecret(verificationToken)) return null;
+
+      const { rows } = await client.query(
+        'INSERT INTO users(email,password_hash,role,name,email_verified) VALUES($1,$2,$3,$4,TRUE) RETURNING id,email,role,name,email_verified',
+        [email, hash, role, name]
+      );
+      await client.query('DELETE FROM preregistration_email_codes WHERE email=$1', [email]);
+      return rows[0];
+    });
+
+    if (!user) return res.status(403).json({ error: 'La verificación del correo no es válida o expiró. Verifica el correo nuevamente.' });
+    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
+    res.status(201).json({ token, user: publicUser(user) });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });
+    next(e);
+  }
+});`;
+
+const newRegister = `app.post('/api/auth/register', async (req, res, next) => {
+  try {
+    const email = cleanEmail(req.body.email);
+    const password = String(req.body.password || '');
+    const name = String(req.body.name || '').trim();
+    const verificationToken = String(req.body.verificationToken || '').trim();
+    const birthDate = String(req.body.birthDate || '').trim();
+    const region = req.body.region === 'NY' ? 'NY' : 'OTHER';
+    const privacyAccepted = req.body.privacyAccepted === true;
+    const role = 'user';
+    const age = calculateAge(birthDate);
+    const ageBand = ageBandFor(age);
+
+    if (!validEmail(email) || password.length < 8 || password.length > 128 || name.length < 2 || name.length > 80) {
+      return res.status(400).json({ error: 'Revisa nombre, correo y contraseña (mínimo 8 caracteres).' });
+    }
+    if (!verificationToken) return res.status(403).json({ error: 'Debes verificar tu correo antes de crear la cuenta.' });
+    if (!Number.isInteger(age) || age < 14 || age > 100 || !ageBand || ageBand === 'under_14') {
+      return res.status(400).json({ error: 'Durante la beta debes tener al menos 14 años para crear una cuenta.', code: 'AGE_NOT_ELIGIBLE' });
+    }
+    if (!privacyAccepted) {
+      return res.status(400).json({ error: 'Debes aceptar los Términos, Privacidad y Normas para crear la cuenta.', code: 'PRIVACY_CONSENT_REQUIRED' });
+    }
+
+    const privacyAcceptedAt = new Date().toISOString();
+    const hash = await bcrypt.hash(password, 12);
+    const user = await withTransaction(async (client) => {
+      const { rows: verificationRows } = await client.query('SELECT * FROM preregistration_email_codes WHERE email=$1 FOR UPDATE', [email]);
+      const verification = verificationRows[0];
+      if (!verification || !verification.verified_at || !verification.token_expires_at) return null;
+      if (new Date(verification.token_expires_at).getTime() < Date.now()) return null;
+      if (verification.verification_token_hash !== hashRegistrationSecret(verificationToken)) return null;
+
+      const { rows } = await client.query(
+        'INSERT INTO users(email,password_hash,role,name,email_verified,birth_date,age_band,region,privacy_accepted_at) VALUES($1,$2,$3,$4,TRUE,$5,$6,$7,$8) RETURNING id,email,role,name,email_verified,age_band',
+        [email, hash, role, name, birthDate, ageBand, region, privacyAcceptedAt]
+      );
+      await client.query('DELETE FROM preregistration_email_codes WHERE email=$1', [email]);
+      return rows[0];
+    });
+
+    if (!user) return res.status(403).json({ error: 'La verificación del correo no es válida o expiró. Verifica el correo nuevamente.' });
+    const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
+    res.status(201).json({ token, user: publicUser(user) });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });
+    next(e);
+  }
+});`;
+replaceOnce(oldRegister, newRegister, 'verified registration route');
 
 fs.writeFileSync(serverPath, source, 'utf8');
 console.log('Age and privacy backend patch applied');
