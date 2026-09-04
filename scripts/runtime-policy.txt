@@ -1,0 +1,1 @@
+Runtime starts server.js directly. Commission patching happens only during image construction.
