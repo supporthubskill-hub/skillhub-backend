@@ -1,0 +1,1 @@
+The Docker build runs postinstall as root before USER node, so server.js is writable at build time.
