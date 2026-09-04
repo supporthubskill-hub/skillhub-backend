@@ -1,0 +1,1 @@
+Final order: copy package files, copy application source, run npm ci so postinstall can access and patch server.js, then start normally as node.
