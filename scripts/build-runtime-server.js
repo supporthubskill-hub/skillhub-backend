@@ -1,13 +1,11 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const sourcePath = path.join(__dirname, '..', 'server.js');
-const runtimePath = path.join(os.tmpdir(), 'zeqviro-runtime-server.js');
 
 function replaceOrThrow(source, needle, replacement, label) {
   if (!source.includes(needle)) {
-    throw new Error(`Runtime server patch failed: ${label}`);
+    throw new Error(`Server patch failed: ${label}`);
   }
   return source.replace(needle, replacement);
 }
@@ -92,8 +90,13 @@ app.patch('/api/admin/settings/commission', auth, allow('admin'), async (req, re
 
   source = source.replaceAll('SkillHub API listening on', 'Zeqviro API listening on');
 
-  fs.writeFileSync(runtimePath, source, 'utf8');
-  return runtimePath;
+  fs.writeFileSync(sourcePath, source, 'utf8');
+  return sourcePath;
+}
+
+if (require.main === module) {
+  buildRuntimeServer();
+  console.log('Zeqviro server patch applied during build');
 }
 
 module.exports = { buildRuntimeServer };

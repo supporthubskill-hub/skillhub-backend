@@ -1,6 +1,5 @@
 require('dotenv').config();
 const { Pool } = require('pg');
-const { buildRuntimeServer } = require('./build-runtime-server');
 
 const BRAND_NAME = 'Zeqviro';
 const LEGACY_BRAND_NAME = 'SkillHub';
@@ -84,8 +83,7 @@ async function promoteConfiguredAdmin() {
   try {
     enableResendMailTransport();
     await promoteConfiguredAdmin();
-    const runtimeServerPath = buildRuntimeServer();
-    require(runtimeServerPath);
+    require('../server');
   } catch (err) {
     console.error(`Startup failed: ${err.message}`);
     process.exit(1);
