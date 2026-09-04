@@ -1,0 +1,1 @@
+Build-time patching avoids writable-runtime filesystem requirements.
