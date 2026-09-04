@@ -45,6 +45,12 @@ replaceOrThrow(
   'hide availability for paused services'
 );
 
+replaceOrThrow(
+  "SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE ORDER BY created_at DESC",
+  "SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC",
+  'hide paused services from public provider profile'
+);
+
 const routes = `app.patch('/api/services/:id/pause', auth, allow('user'), async (req, res, next) => {
   try {
     const serviceId = Number(req.params.id);
