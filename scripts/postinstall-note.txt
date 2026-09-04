@@ -1,0 +1,1 @@
+package.json postinstall requires scripts/build-runtime-server.js and server.js to exist before npm ci runs.
