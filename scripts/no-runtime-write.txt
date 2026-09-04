@@ -1,0 +1,1 @@
+After the image is built, Zeqviro does not need to modify application files at startup.
