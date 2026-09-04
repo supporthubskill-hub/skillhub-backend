@@ -1,0 +1,1 @@
+Scope: Docker build ordering only. Existing backend features and test-only payment status are preserved.
