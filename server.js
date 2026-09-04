@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
@@ -31,10 +33,11 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '32kb' }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false }));
+const verificationLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: true, legacyHeaders: false });
 
 const cleanEmail = (value) => String(value || '').trim().toLowerCase();
 const validEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-const publicUser = (u) => ({ id: u.id, email: u.email, role: u.role, name: u.name });
+const publicUser = (u) => ({ id: u.id, email: u.email, role: u.role, name: u.name, emailVerified: Boolean(u.email_verified) });
 
 async function initDb() {
   await pool.query(`
@@ -135,6 +138,14 @@ async function initDb() {
       body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 1000),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS email_verification_codes (
+      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_verification_expires ON email_verification_codes(expires_at);
     CREATE TABLE IF NOT EXISTS admin_actions (
       id BIGSERIAL PRIMARY KEY,
       admin_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -157,7 +168,7 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET, { issuer: 'skillhub' });
-    const { rows } = await pool.query('SELECT id,email,role,name,account_status FROM users WHERE id=$1', [payload.id]);
+    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified FROM users WHERE id=$1', [payload.id]);
     const user = rows[0];
     if (!user) return res.status(401).json({ error: 'Account not found' });
     if (user.account_status === 'suspended') return res.status(403).json({ error: 'Account suspended' });
@@ -232,6 +243,114 @@ app.post('/api/auth/login', async (req, res, next) => {
     }
     const token = jwt.sign(publicUser(user), process.env.JWT_SECRET, { expiresIn: '2h', issuer: 'skillhub' });
     res.json({ token, user: publicUser(user) });
+  } catch (e) { next(e); }
+});
+
+const hashVerificationCode = (code) => crypto
+  .createHmac('sha256', process.env.JWT_SECRET)
+  .update(String(code))
+  .digest('hex');
+
+function createMailTransport() {
+  const user = String(process.env.SMTP_USER || '').trim();
+  const pass = String(process.env.SMTP_PASS || '').trim();
+  if (!user || !pass) throw new Error('Email verification is not configured');
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE || 'true').toLowerCase() !== 'false',
+    auth: { user, pass }
+  });
+}
+
+async function sendVerificationMail(email, code) {
+  const transporter = createMailTransport();
+  const from = process.env.EMAIL_FROM || `SkillHub <${process.env.SMTP_USER}>`;
+  await transporter.sendMail({
+    from,
+    to: email,
+    subject: 'Tu código de verificación de SkillHub',
+    text: `Tu código de verificación de SkillHub es ${code}. Expira en 10 minutos. Si no solicitaste este código, ignora este correo.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px"><h2>Verifica tu correo en SkillHub</h2><p>Usa este código para confirmar tu correo:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;margin:24px 0">${code}</div><p>El código expira en 10 minutos.</p><p style="color:#64748b;font-size:13px">Si no solicitaste este código, puedes ignorar este mensaje.</p></div>`
+  });
+}
+
+app.get('/api/verification/status', auth, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query('SELECT email_verified,phone_verified,identity_status FROM users WHERE id=$1', [req.user.id]);
+    const user = rows[0];
+    res.json({
+      emailVerified: Boolean(user?.email_verified),
+      phoneVerified: Boolean(user?.phone_verified),
+      identityStatus: user?.identity_status || 'unverified'
+    });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/verification/email/send', auth, verificationLimiter, async (req, res, next) => {
+  try {
+    const { rows: userRows } = await pool.query('SELECT email,email_verified FROM users WHERE id=$1', [req.user.id]);
+    const user = userRows[0];
+    if (!user) return res.status(404).json({ error: 'Cuenta no encontrada' });
+    if (user.email_verified) return res.json({ verified: true, message: 'Tu correo ya está verificado.' });
+
+    const { rows: existingRows } = await pool.query('SELECT last_sent_at FROM email_verification_codes WHERE user_id=$1', [req.user.id]);
+    const lastSent = existingRows[0]?.last_sent_at ? new Date(existingRows[0].last_sent_at).getTime() : 0;
+    const remainingMs = 60_000 - (Date.now() - lastSent);
+    if (remainingMs > 0) return res.status(429).json({ error: `Espera ${Math.ceil(remainingMs / 1000)} segundos antes de pedir otro código.` });
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const codeHash = hashVerificationCode(code);
+    await pool.query(`INSERT INTO email_verification_codes(user_id,code_hash,expires_at,attempts,last_sent_at)
+      VALUES($1,$2,NOW() + INTERVAL '10 minutes',0,NOW())
+      ON CONFLICT(user_id) DO UPDATE SET code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,attempts=0,last_sent_at=NOW()`,
+      [req.user.id, codeHash]);
+
+    try {
+      await sendVerificationMail(user.email, code);
+    } catch (mailError) {
+      await pool.query('DELETE FROM email_verification_codes WHERE user_id=$1 AND code_hash=$2', [req.user.id, codeHash]);
+      throw mailError;
+    }
+
+    res.json({ sent: true, expiresInSeconds: 600, message: 'Código enviado. Revisa tu correo.' });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/verification/email/confirm', auth, verificationLimiter, async (req, res, next) => {
+  try {
+    const code = String(req.body.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Ingresa el código de 6 dígitos.' });
+
+    const verified = await withTransaction(async (client) => {
+      const { rows: userRows } = await client.query('SELECT email_verified FROM users WHERE id=$1 FOR UPDATE', [req.user.id]);
+      if (userRows[0]?.email_verified) return true;
+
+      const { rows } = await client.query('SELECT code_hash,expires_at,attempts FROM email_verification_codes WHERE user_id=$1 FOR UPDATE', [req.user.id]);
+      const record = rows[0];
+      if (!record) return null;
+      if (new Date(record.expires_at).getTime() < Date.now()) {
+        await client.query('DELETE FROM email_verification_codes WHERE user_id=$1', [req.user.id]);
+        return 'expired';
+      }
+      if (record.attempts >= 5) {
+        await client.query('DELETE FROM email_verification_codes WHERE user_id=$1', [req.user.id]);
+        return 'locked';
+      }
+      if (hashVerificationCode(code) !== record.code_hash) {
+        await client.query('UPDATE email_verification_codes SET attempts=attempts+1 WHERE user_id=$1', [req.user.id]);
+        return false;
+      }
+      await client.query('UPDATE users SET email_verified=TRUE WHERE id=$1', [req.user.id]);
+      await client.query('DELETE FROM email_verification_codes WHERE user_id=$1', [req.user.id]);
+      return true;
+    });
+
+    if (verified === true) return res.json({ verified: true, message: 'Correo verificado correctamente.' });
+    if (verified === 'expired') return res.status(400).json({ error: 'El código expiró. Solicita uno nuevo.' });
+    if (verified === 'locked') return res.status(429).json({ error: 'Demasiados intentos. Solicita un código nuevo.' });
+    if (verified === null) return res.status(400).json({ error: 'Primero solicita un código de verificación.' });
+    return res.status(400).json({ error: 'Código incorrecto.' });
   } catch (e) { next(e); }
 });
 
