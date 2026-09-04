@@ -1,0 +1,1 @@
+Build scripts in this directory are copied before npm ci so postinstall can patch server.js during the Docker build.
