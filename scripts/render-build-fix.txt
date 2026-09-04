@@ -1,0 +1,1 @@
+The prior Dockerfile copied only package files before npm ci, so the postinstall script did not exist yet. The corrected Dockerfile copies source first.
