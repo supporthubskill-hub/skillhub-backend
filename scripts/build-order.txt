@@ -1,0 +1,5 @@
+1. copy package files
+2. copy server.js and scripts
+3. npm ci (postinstall applies commission patch)
+4. copy remaining app
+5. start normally
