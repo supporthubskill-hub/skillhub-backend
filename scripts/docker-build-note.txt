@@ -1,0 +1,1 @@
+Docker copies the patch inputs before dependency installation; this fixes MODULE_NOT_FOUND during postinstall.
