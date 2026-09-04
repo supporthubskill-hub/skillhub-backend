@@ -73,37 +73,47 @@ app.post('/api/admin/notifications/send', auth, allow('admin'), async (req, res,
     if (audience === 'user' && (!Number.isInteger(targetUserId) || targetUserId < 1)) return res.status(400).json({ error: 'Selecciona un usuario' });
 
     const result = await withTransaction(async (client) => {
-      let recipients = [];
-      if (audience === 'all') {
-        const { rows } = await client.query("SELECT id FROM users WHERE role <> 'admin' AND COALESCE(account_status,'active') <> 'deleted'");
-        recipients = rows;
+      let recipientCount = 0;
+      if (audience === 'user') {
+        const exists = await client.query("SELECT 1 FROM users WHERE id=$1 AND role <> 'admin' AND account_status <> 'suspended' LIMIT 1", [targetUserId]);
+        if (!exists.rows[0]) { const err = new Error('Usuario no encontrado o no disponible'); err.statusCode = 404; throw err; }
+        recipientCount = 1;
       } else {
-        const { rows } = await client.query("SELECT id,name,email FROM users WHERE id=$1 AND role <> 'admin' AND COALESCE(account_status,'active') <> 'deleted' LIMIT 1", [targetUserId]);
-        if (!rows[0]) { const err = new Error('Usuario no encontrado'); err.statusCode = 404; throw err; }
-        recipients = rows;
+        const countResult = await client.query("SELECT COUNT(*)::int AS count FROM users WHERE role <> 'admin' AND account_status <> 'suspended'");
+        recipientCount = Number(countResult.rows[0]?.count || 0);
       }
+
       const { rows: campaignRows } = await client.query(\`INSERT INTO admin_notification_campaigns(admin_id,audience,target_user_id,title,body,recipient_count)
         VALUES($1,$2,$3,$4,$5,$6) RETURNING id,created_at AS "createdAt"\`,
-        [req.user.id, audience, audience === 'user' ? targetUserId : null, title, body, recipients.length]);
+        [req.user.id, audience, audience === 'user' ? targetUserId : null, title, body, recipientCount]);
       const campaign = campaignRows[0];
-      if (recipients.length) {
-        const values = [];
-        const placeholders = recipients.map((recipient, index) => {
-          const base = index * 4;
-          values.push(recipient.id, campaign.id, title, body);
-          return \`($\${base + 1},$\${base + 2},$\${base + 3},$\${base + 4})\`;
-        }).join(',');
-        await client.query(\`INSERT INTO user_notifications(user_id,campaign_id,title,body) VALUES \${placeholders}\`, values);
+
+      if (audience === 'user') {
+        await client.query(\`INSERT INTO user_notifications(user_id,campaign_id,title,body)
+          SELECT id,$2,$3,$4 FROM users WHERE id=$1 AND role <> 'admin' AND account_status <> 'suspended'\`,
+          [targetUserId, campaign.id, title, body]);
+      } else {
+        await client.query(\`INSERT INTO user_notifications(user_id,campaign_id,title,body)
+          SELECT id,$1,$2,$3 FROM users WHERE role <> 'admin' AND account_status <> 'suspended'\`,
+          [campaign.id, title, body]);
       }
-      const reason = audience === 'all' ? \`Notificación general enviada a \${recipients.length} usuarios: \${title}\` : \`Notificación individual enviada al usuario \${targetUserId}: \${title}\`;
-      await client.query(\`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason)
-        VALUES($1,'notification_sent',$2,$3,$4)\`, [req.user.id, audience === 'all' ? 'users' : 'user', audience === 'all' ? 0 : targetUserId, reason]);
-      return { campaignId: campaign.id, recipientCount: recipients.length, createdAt: campaign.createdAt };
+
+      return { campaignId: campaign.id, recipientCount, createdAt: campaign.createdAt };
     });
+
+    const reason = audience === 'all'
+      ? \`Notificación general enviada a \${result.recipientCount} usuarios: \${title}\`
+      : \`Notificación individual enviada al usuario \${targetUserId}: \${title}\`;
+    pool.query(\`INSERT INTO admin_actions(admin_id,action,target_type,target_id,reason)
+      VALUES($1,'notification_sent',$2,$3,$4)\`,
+      [req.user.id, audience === 'all' ? 'users' : 'user', audience === 'all' ? 0 : targetUserId, reason])
+      .catch((auditError) => console.error('Notification audit write failed:', auditError.message));
+
     res.status(201).json({ ...result, message: result.recipientCount === 1 ? 'Notificación enviada.' : \`Notificación enviada a \${result.recipientCount} usuarios.\` });
   } catch (e) {
     if (e.statusCode) return res.status(e.statusCode).json({ error: e.message });
-    next(e);
+    console.error('Notification send failed:', e.message);
+    res.status(500).json({ error: 'No se pudo enviar la notificación. Intenta nuevamente.' });
   }
 });
 
