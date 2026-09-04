@@ -1,0 +1,1 @@
+The Docker image copies server.js and scripts/ before npm ci because package.json runs scripts/build-runtime-server.js in postinstall. This allows the Zeqviro commission patch to be applied during image build instead of at runtime.
