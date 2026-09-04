@@ -1,0 +1,35 @@
+name: Block 5 verification
+
+on:
+  push:
+    branches:
+      - chatgpt/block5-beta-safety
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify-backend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies and apply patch chain
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Verify generated Block 5 server
+        run: npm run verify:block5
