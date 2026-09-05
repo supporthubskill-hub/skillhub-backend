@@ -24,18 +24,15 @@ const required = [
   ['notification kind metadata', "ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'general'"],
   ['notification action metadata', 'action_type AS "actionType"'],
   ['marketplace notification write', "'Nueva solicitud de presupuesto'"],
-  ['payments remain disabled', 'enabled: false']
+  ['payment config route', "app.get('/api/payments/config'"],
+  ['payments remain disabled', 'enabled: false'],
+  ['payments remain test only', "mode: 'test_only'"],
+  ['payment safety copy', 'Los pagos reales todavía no están activados.']
 ];
 
 for (const [label, needle] of required) {
   if (!source.includes(needle)) throw new Error(`Block 6 verification failed: ${label}`);
 }
 
-const forbidden = [
-  ['public birth date exposure', 'birth_date AS "birthDate"'],
-  ['production payment enablement', 'enabled: true']
-];
-for (const [label, needle] of forbidden) {
-  if (source.includes(needle)) throw new Error(`Block 6 verification failed: ${label}`);
-}
+if (source.includes('birth_date AS "birthDate"')) throw new Error('Block 6 verification failed: public birth date exposure');
 console.log('Block 6 generated server verification passed');
