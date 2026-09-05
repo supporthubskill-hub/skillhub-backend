@@ -52,11 +52,19 @@ replaceOnce(
   'service update image'
 );
 
-replaceOnce(
-  `SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC`,
-  `SELECT id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area,image_url AS \"imageUrl\",\n      EXISTS (SELECT 1 FROM availability a WHERE a.service_id=services.id AND a.available=TRUE AND a.starts_at>NOW()) AS \"hasAvailability\"\n      FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC`,
-  'public provider service details'
-);
+const providerServiceSelectWithImage = `SELECT id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area,image_url AS \"imageUrl\",\n      EXISTS (SELECT 1 FROM availability a WHERE a.service_id=services.id AND a.available=TRUE AND a.starts_at>NOW()) AS \"hasAvailability\"\n      FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC`;
+const providerServiceSelectEnhanced = `SELECT id,name,description AS desc,category AS cat,service_type AS type,price::float,hourly_price::float AS hourly,area,\n      EXISTS (SELECT 1 FROM availability a WHERE a.service_id=services.id AND a.available=TRUE AND a.starts_at>NOW()) AS \"hasAvailability\"\n      FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC`;
+const providerServiceSelectLegacy = `SELECT id,name,description AS desc,price::float,area FROM services WHERE provider_id=$1 AND active=TRUE AND COALESCE(paused,FALSE)=FALSE ORDER BY created_at DESC`;
+
+if (!source.includes(providerServiceSelectWithImage)) {
+  if (source.includes(providerServiceSelectEnhanced)) {
+    source = source.replace(providerServiceSelectEnhanced, providerServiceSelectWithImage);
+  } else if (source.includes(providerServiceSelectLegacy)) {
+    source = source.replace(providerServiceSelectLegacy, providerServiceSelectWithImage);
+  } else {
+    throw new Error('Block 6 service patch failed: public provider service details');
+  }
+}
 
 fs.writeFileSync(serverPath, source, 'utf8');
 console.log('Block 6 service enhancements applied');
