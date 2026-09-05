@@ -22,6 +22,24 @@ const authSelect = "    const { rows } = await pool.query('SELECT id,email,role,
 const authSelectNew = "    const { rows } = await pool.query('SELECT id,email,role,name,account_status,email_verified,suspended_until,suspension_reason,age_band FROM users WHERE id=$1', [payload.id]);";
 replaceOnce(authSelect, authSelectNew, 'auth user age band');
 
+const adminUsersSelect = `    const { rows } = await pool.query(\`SELECT u.id,u.name,u.email,u.role,u.account_status AS "accountStatus",
+      u.identity_status AS "identityStatus",u.created_at AS "createdAt",
+      (SELECT COUNT(*)::int FROM services s WHERE s.provider_id=u.id) AS "serviceCount"
+      FROM users u WHERE ($1='' OR u.name ILIKE $2 OR u.email ILIKE $2)`;
+const adminUsersSelectNew = `    const { rows } = await pool.query(\`SELECT u.id,u.name,u.email,u.role,u.account_status AS "accountStatus",
+      u.identity_status AS "identityStatus",u.age_band AS "ageBand",u.created_at AS "createdAt",
+      (SELECT COUNT(*)::int FROM services s WHERE s.provider_id=u.id) AS "serviceCount"
+      FROM users u WHERE ($1='' OR u.name ILIKE $2 OR u.email ILIKE $2)`;
+replaceOnce(adminUsersSelect, adminUsersSelectNew, 'admin user list age band');
+
+const adminUserDetailSelect = `    const { rows: users } = await pool.query(\`SELECT id,name,email,role,account_status AS "accountStatus",identity_status AS "identityStatus",
+      email_verified AS "emailVerified",phone_verified AS "phoneVerified",headline,bio,skills,languages,location,experience,portfolio_url AS "portfolioUrl",created_at AS "createdAt"
+      FROM users WHERE id=$1\`, [req.params.id]);`;
+const adminUserDetailSelectNew = `    const { rows: users } = await pool.query(\`SELECT id,name,email,role,account_status AS "accountStatus",identity_status AS "identityStatus",age_band AS "ageBand",
+      email_verified AS "emailVerified",phone_verified AS "phoneVerified",headline,bio,skills,languages,location,experience,portfolio_url AS "portfolioUrl",created_at AS "createdAt"
+      FROM users WHERE id=$1\`, [req.params.id]);`;
+replaceOnce(adminUserDetailSelect, adminUserDetailSelectNew, 'admin user detail age band');
+
 const oldRegister = `app.post('/api/auth/register', async (req, res, next) => {
   try {
     const email = cleanEmail(req.body.email);
