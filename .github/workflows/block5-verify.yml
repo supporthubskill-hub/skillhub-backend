@@ -1,9 +1,10 @@
-name: Block 5 verification
+name: Block 5 and 6 verification
 
 on:
   push:
     branches:
       - chatgpt/block5-beta-safety
+      - chatgpt/block6-marketplace
   pull_request:
     branches:
       - main
@@ -33,3 +34,6 @@ jobs:
 
       - name: Verify generated Block 5 server
         run: npm run verify:block5
+
+      - name: Verify generated Block 6 server
+        run: npm run verify:block6
