@@ -19,12 +19,12 @@ const required = [
   ['service requests route', "app.get('/api/service-requests'"],
   ['quote route', "app.patch('/api/service-requests/:id/quote'"],
   ['booking reschedule route', "app.post('/api/bookings/:id/reschedule'"],
-  ['verified review eligibility route', "app.get('/api/reviews/eligible-bookings'"],
+  ['verified review eligibility route', "app.get('/api/reviews/me'"],
   ['provider dashboard route', "app.get('/api/provider-dashboard'"],
   ['notification kind metadata', "ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'general'"],
   ['notification action metadata', 'action_type AS "actionType"'],
   ['marketplace notification write', "'Nueva solicitud de presupuesto'"],
-  ['payments remain disabled', "enabled: false"]
+  ['payments remain disabled', 'enabled: false']
 ];
 
 for (const [label, needle] of required) {
