@@ -37,7 +37,7 @@ function verifyStripeSignature(rawBody, header) {
   if (!timestamp || !signatures.length) return false;
   const ts = Number(timestamp);
   if (!Number.isFinite(ts) || Math.abs(Math.floor(Date.now() / 1000) - ts) > 300) return false;
-  const payload = \\`${timestamp}.\\${rawBody.toString('utf8')}\\`;
+  const payload = timestamp + '.' + rawBody.toString('utf8');
   const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
   return signatures.some(sig => {
     try {
