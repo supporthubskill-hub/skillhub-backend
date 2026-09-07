@@ -10,20 +10,25 @@ function replaceOnce(needle, replacement, label) {
   source = source.replace(needle, replacement);
 }
 
-// Earlier runtime patches modify the email-verification table area. Anchor this
-// addition immediately after the booking payment columns instead, which is the
-// stable schema location Block 8 depends on.
+// Earlier runtime patches modify nearby schema sections. Anchor Block 8 to the
+// stable booking payment columns that the base server already creates.
 replaceOnce(
   `    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_amount NUMERIC(10,2) NOT NULL DEFAULT 0;`,
   `    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_amount NUMERIC(10,2) NOT NULL DEFAULT 0;\n    CREATE TABLE IF NOT EXISTS payment_records (\n      id BIGSERIAL PRIMARY KEY,\n      booking_id BIGINT UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,\n      client_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n      provider_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n      processor TEXT NOT NULL DEFAULT 'none',\n      processor_payment_id TEXT NOT NULL DEFAULT '',\n      currency TEXT NOT NULL DEFAULT 'usd',\n      gross_amount NUMERIC(10,2) NOT NULL CHECK (gross_amount >= 0),\n      platform_fee NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (platform_fee >= 0),\n      provider_amount NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (provider_amount >= 0),\n      status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started','requires_payment','processing','paid','refunded','failed','cancelled')),\n      mode TEXT NOT NULL DEFAULT 'test' CHECK (mode IN ('test','live')),\n      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n    );\n    CREATE INDEX IF NOT EXISTS idx_payment_records_status_created ON payment_records(status, created_at DESC);\n    CREATE INDEX IF NOT EXISTS idx_payment_records_provider_created ON payment_records(provider_id, created_at DESC);`,
   'payment records table'
 );
 
-replaceOnce(
-  `app.get('/api/payments/config', (_req, res) => {\n  res.json({\n    enabled: false,\n    mode: 'test_only',\n    currency: 'usd',\n    commissionRate: COMMISSION_RATE,\n    message: 'Los pagos reales todavía no están activados.'\n  });\n});`,
-  `app.get('/api/payments/config', (_req, res) => {\n  res.json({\n    enabled: false,\n    mode: 'test_only',\n    currency: 'usd',\n    commissionRate: COMMISSION_RATE,\n    foundationReady: true,\n    processor: 'not_configured',\n    message: 'La base de pagos está preparada en modo de prueba. Los pagos reales siguen desactivados.'\n  });\n});`,
-  'payment config metadata'
-);
+// Patch the config route by route boundaries instead of matching its exact old
+// response body. Previous runtime patches can legitimately change that body.
+if (!source.includes('foundationReady: true')) {
+  const configStart = source.indexOf("app.get('/api/payments/config'");
+  const nextRoute = configStart >= 0 ? source.indexOf('\napp.', configStart + 1) : -1;
+  if (configStart < 0 || nextRoute < 0) {
+    throw new Error('Block 8 payments patch failed: payment config metadata');
+  }
+  const configReplacement = `app.get('/api/payments/config', (_req, res) => {\n  res.json({\n    enabled: false,\n    mode: 'test_only',\n    currency: 'usd',\n    commissionRate: COMMISSION_RATE,\n    foundationReady: true,\n    processor: 'not_configured',\n    message: 'La base de pagos está preparada en modo de prueba. Los pagos reales siguen desactivados.'\n  });\n});\n`;
+  source = source.slice(0, configStart) + configReplacement + source.slice(nextRoute + 1);
+}
 
 const routes = `
 app.get('/api/payments/bookings/:id', auth, allow('user'), async (req, res, next) => {
