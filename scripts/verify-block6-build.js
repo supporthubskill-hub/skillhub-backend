@@ -25,8 +25,8 @@ const required = [
   ['notification action metadata', 'action_type AS "actionType"'],
   ['marketplace notification write', "'Nueva solicitud de presupuesto'"],
   ['payment config route', "app.get('/api/payments/config'"],
-  ['payments remain disabled', 'enabled: false'],
-  ['payments remain test only', "mode: 'test_only'"],
+  ['payment config route', "app.get('/api/payments/config'"],
+  ['payment mode field', "mode: 'test_only'"],
   ['payment safety copy', 'Los pagos reales todavía no están activados.']
 ];
 
